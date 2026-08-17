@@ -36,9 +36,18 @@ export interface SessionHooks {
   readonly "http.response": SessionHttpResponse
 }
 
-export type SessionDomain = Pick<
-  SessionApi<unknown>,
-  "create" | "get" | "prompt" | "generate" | "command" | "synthetic" | "interrupt" | "rename" | "wait"
-> & {
+export interface CreateChildInput {
+  readonly parentID: Session.ID
+  readonly title?: string
+  readonly agent?: Agent.ID
+  readonly model?: Model.Ref
+}
+
+export interface SessionDomain
+  extends Pick<
+    SessionApi<unknown>,
+    "create" | "get" | "prompt" | "generate" | "command" | "synthetic" | "interrupt" | "rename" | "wait"
+  > {
+  readonly createChild: (input: CreateChildInput) => ReturnType<SessionApi<unknown>["create"]>
   readonly hook: Hooks<SessionHooks>
 }

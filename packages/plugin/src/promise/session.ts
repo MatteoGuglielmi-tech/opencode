@@ -1,4 +1,5 @@
 import type { SessionApi } from "@opencode-ai/client/promise/api"
+import type { ModelRef } from "@opencode-ai/client"
 import type { Message, SystemPart } from "@opencode-ai/ai"
 import type { Agent } from "@opencode-ai/schema/agent"
 import type { Model } from "@opencode-ai/schema/model"
@@ -36,9 +37,15 @@ export interface SessionHooks {
   readonly "http.response": SessionHttpResponse
 }
 
-export type SessionDomain = Pick<
-  SessionApi,
-  "create" | "get" | "prompt" | "generate" | "command" | "synthetic" | "interrupt"
-> & {
+export interface CreateChildInput {
+  readonly parentID: string
+  readonly title?: string
+  readonly agent?: string
+  readonly model?: ModelRef
+}
+
+export interface SessionDomain
+  extends Pick<SessionApi, "create" | "get" | "prompt" | "generate" | "command" | "synthetic" | "interrupt"> {
+  readonly createChild: (input: CreateChildInput) => ReturnType<SessionApi["create"]>
   readonly hook: Hooks<SessionHooks>
 }

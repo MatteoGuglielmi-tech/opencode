@@ -298,6 +298,15 @@ export function fromPromise(plugin: Plugin) {
                       },
                 ),
               ),
+            createChild: (input) =>
+              run(
+                host.session.createChild({
+                  parentID: Session.ID.make(input.parentID),
+                  title: input.title,
+                  agent: input.agent == null ? undefined : Agent.ID.make(input.agent),
+                  model: input.model == null ? undefined : model(input.model),
+                }),
+              ),
             get: (input) => run(host.session.get({ sessionID: Session.ID.make(input.sessionID) })),
             prompt: (input) =>
               run(

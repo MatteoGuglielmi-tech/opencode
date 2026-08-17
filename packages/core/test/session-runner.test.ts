@@ -15,6 +15,8 @@ import {
 import * as OpenAIChat from "@opencode-ai/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode-ai/ai/testing"
 import { Catalog } from "@opencode-ai/core/catalog"
+import { AISDK } from "@opencode-ai/core/aisdk"
+import { Command } from "@opencode-ai/core/command"
 import { Database } from "@opencode-ai/core/database/database"
 import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -44,6 +46,8 @@ import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { PromptCacheDiagnostics } from "@opencode-ai/core/session/prompt-cache-diagnostics"
 import { SessionUsage } from "@opencode-ai/core/session/usage"
 import { PluginSupervisor } from "@opencode-ai/core/plugin/supervisor"
+import { PluginHost } from "@opencode-ai/core/plugin/host"
+import { PluginRuntime } from "@opencode-ai/core/plugin/runtime"
 import { PluginHooks } from "@opencode-ai/core/plugin/hooks"
 import { SystemPromptPlugin } from "@opencode-ai/core/plugin/system-prompt"
 import { QuestionTool } from "@opencode-ai/core/tool/plugin/question"
@@ -70,6 +74,10 @@ import { McpInstructions } from "@opencode-ai/core/mcp/instructions"
 import { ID } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { Provider } from "@opencode-ai/core/provider"
+import { Integration } from "@opencode-ai/core/integration"
+import { Reference } from "@opencode-ai/core/reference"
+import { Skill } from "@opencode-ai/core/skill"
+import { WebSearch } from "@opencode-ai/core/websearch"
 import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { asc, desc, eq } from "drizzle-orm"
@@ -225,10 +233,31 @@ const transformTools = (registry: Tool.Interface, tools: Readonly<Record<string,
     Object.entries(tools).forEach(([name, tool]) => draft.add({ ...tool, name, options: options ?? tool.options })),
   )
 const echo = Layer.effectDiscard(
-  Tool.Service.use((registry) =>
-    transformTools(
+  Effect.gen(function* () {
+    const registry = yield* Tool.Service
+    const permissions = yield* Permission.Service
+    yield* transformTools(
       registry,
       {
+        approval: {
+          name: "approval",
+          description: "Require approval",
+          input: Schema.Struct({}),
+          output: Schema.Struct({ approved: Schema.Boolean }),
+          execute: (_, context) =>
+            permissions
+              .assert({
+                sessionID: context.sessionID,
+                agent: context.agent,
+                action: "approval",
+                resources: ["protected"],
+                source: { type: "tool", messageID: context.messageID, id: context.id },
+              })
+              .pipe(
+                Effect.mapError((error) => new ToolFailure({ message: error.message, error })),
+                Effect.as({ output: { approved: true } }),
+              ),
+        },
         echo: {
           name: "echo",
           description: "Echo text",
@@ -258,10 +287,10 @@ const echo = Layer.effectDiscard(
         },
       },
       { codemode: false },
-    ),
-  ),
+    )
+  }),
 )
-const echoNode = makeLocationNode({ name: "test/session-runner-tools", layer: echo, deps: [Tool.node] })
+const echoNode = makeLocationNode({ name: "test/session-runner-tools", layer: echo, deps: [Tool.node, Permission.node] })
 let modelResolveHook = Effect.void
 let currentModel = model
 const models = Layer.mock(SessionRunnerModel.Service)({
@@ -360,7 +389,7 @@ const promptCatalog = Layer.mock(Catalog.Service, {
     small: () => Effect.succeed(undefined),
   },
 })
-const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
+const runnerReplacements = [
   [Snapshot.node, Snapshot.noopLayer],
   [LayerNodePlatform.llmClient, client],
   [SessionRunnerModel.node, models],
@@ -369,82 +398,113 @@ const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
   [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
   [SkillInstructions.node, skillInstructions],
   [ReferenceInstructions.node, referenceInstructions],
-  [Permission.node, permission],
   [Config.node, config],
   [McpInstructions.node, mcpInstructions],
   [PluginSupervisor.node, pluginSupervisor],
+] as const
+const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
+  ...runnerReplacements,
+  [Permission.node, permission],
 ])
-const execution = Layer.effect(
-  SessionExecution.Service,
-  Effect.gen(function* () {
-    const sessionRunner = yield* SessionRunner.Service
-    function drain(
-      sessionID: Session.ID,
-      force: boolean,
-      continuation?: SessionRunner.Continuation,
-    ): Effect.Effect<void, SessionRunner.RunError> {
-      return sessionRunner
-        .drain({ sessionID, force, continuation })
-        .pipe(
-          Effect.flatMap((result) =>
-            result.type === "complete" ? Effect.void : drain(sessionID, false, result.continuation),
-          ),
-        )
-    }
-    const coordinator = yield* SessionRunCoordinator.make<Session.ID, SessionRunner.RunError>({
-      drain: (sessionID, force) => drain(sessionID, force),
-    })
-    return SessionExecution.Service.of({
-      active: coordinator.active,
-      resume: coordinator.run,
-      wake: coordinator.wake,
-      interrupt: coordinator.interrupt,
-      awaitIdle: coordinator.awaitIdle,
-    })
-  }),
-).pipe(Layer.provide(runnerLayer))
+const approvalRunnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, runnerReplacements)
+const executionLayer = (runner: Layer.Layer<SessionRunner.Service>) =>
+  Layer.effect(
+    SessionExecution.Service,
+    Effect.gen(function* () {
+      const sessionRunner = yield* SessionRunner.Service
+      function drain(
+        sessionID: Session.ID,
+        force: boolean,
+        continuation?: SessionRunner.Continuation,
+      ): Effect.Effect<void, SessionRunner.RunError> {
+        return sessionRunner
+          .drain({ sessionID, force, continuation })
+          .pipe(
+            Effect.flatMap((result) =>
+              result.type === "complete" ? Effect.void : drain(sessionID, false, result.continuation),
+            ),
+          )
+      }
+      const coordinator = yield* SessionRunCoordinator.make<Session.ID, SessionRunner.RunError>({
+        drain: (sessionID, force) => drain(sessionID, force),
+      })
+      return SessionExecution.Service.of({
+        active: coordinator.active,
+        resume: coordinator.run,
+        wake: coordinator.wake,
+        interrupt: coordinator.interrupt,
+        awaitIdle: coordinator.awaitIdle,
+      })
+    }),
+  ).pipe(Layer.provide(runner))
+const execution = executionLayer(runnerLayer)
+const approvalExecution = executionLayer(approvalRunnerLayer)
+const testNodes = [
+  Database.node,
+  Bus.node,
+  Permission.node,
+  Location.node,
+  Form.node,
+  SessionProjector.node,
+  SessionStore.node,
+  Agent.node,
+  Catalog.node,
+  Tool.node,
+  Tool.node,
+  PluginHooks.node,
+  PluginHooks.node,
+  echoNode,
+  SessionRunnerModel.node,
+  InstructionBuiltIns.node,
+  InstructionDiscovery.node,
+  InstructionEntry.node,
+  SkillInstructions.node,
+  ReferenceInstructions.node,
+  Config.node,
+  Snapshot.node,
+  SessionRunnerLLM.node,
+  SessionExecution.node,
+  Session.node,
+] as const
+const testReplacements = [
+  [Bus.node, Bus.configured({ persist: true })],
+  [LayerNodePlatform.llmClient, client],
+  [Catalog.node, promptCatalog],
+  [SessionRunnerModel.node, models],
+  [InstructionBuiltIns.node, systemContext],
+  [InstructionDiscovery.node, instructionContext],
+  [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
+  [SkillInstructions.node, skillInstructions],
+  [ReferenceInstructions.node, referenceInstructions],
+  [Snapshot.node, Snapshot.noopLayer],
+  [Config.node, config],
+  [PluginSupervisor.node, pluginSupervisor],
+] as const
 const it = testEffect(
   AppNodeBuilder.build(
+    LayerNode.group(testNodes),
+    [
+      ...testReplacements,
+      [Permission.node, permission],
+      [SessionExecution.node, execution],
+    ],
+  ).pipe(Layer.provideMerge(testLLM)),
+)
+const approvalIt = testEffect(
+  AppNodeBuilder.build(
     LayerNode.group([
-      Database.node,
-      Bus.node,
-      Form.node,
-      SessionProjector.node,
-      SessionStore.node,
-      Agent.node,
-      Catalog.node,
-      Tool.node,
-      Tool.node,
-      PluginHooks.node,
-      PluginHooks.node,
-      echoNode,
-      SessionRunnerModel.node,
-      InstructionBuiltIns.node,
-      InstructionDiscovery.node,
-      InstructionEntry.node,
-      SkillInstructions.node,
-      ReferenceInstructions.node,
-      Config.node,
-      Snapshot.node,
-      SessionRunnerLLM.node,
-      SessionExecution.node,
-      Session.node,
+      ...testNodes,
+      AISDK.node,
+      Command.node,
+      Integration.node,
+      Reference.node,
+      Skill.node,
+      WebSearch.node,
+      PluginRuntime.node,
     ]),
     [
-      [Bus.node, Bus.configured({ persist: true })],
-      [LayerNodePlatform.llmClient, client],
-      [Permission.node, permission],
-      [Catalog.node, promptCatalog],
-      [SessionRunnerModel.node, models],
-      [InstructionBuiltIns.node, systemContext],
-      [InstructionDiscovery.node, instructionContext],
-      [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
-      [SkillInstructions.node, skillInstructions],
-      [ReferenceInstructions.node, referenceInstructions],
-      [Snapshot.node, Snapshot.noopLayer],
-      [SessionExecution.node, execution],
-      [Config.node, config],
-      [PluginSupervisor.node, pluginSupervisor],
+      ...testReplacements,
+      [SessionExecution.node, approvalExecution],
     ],
   ).pipe(Layer.provideMerge(testLLM)),
 )
@@ -503,6 +563,7 @@ const setup = Effect.gen(function* () {
   yield* agents.transform((draft) =>
     draft.update(Agent.ID.make("build"), (agent) => {
       agent.mode = "primary"
+      agent.permissions.push({ action: "approval", resource: "*", effect: "deny" })
     }),
   )
   yield* db
@@ -822,6 +883,63 @@ const verifyPartialFlushOnInterruption = (kind: FragmentKind) =>
   })
 
 describe("SessionRunnerLLM", () => {
+  approvalIt.effect("routes child execution approval through the selected agent", () =>
+    Effect.gen(function* () {
+      const session = yield* setup
+      const agents = yield* Agent.Service
+      const permissions = yield* Permission.Service
+      const bus = yield* Bus.Service
+      const runtime = yield* PluginRuntime.Service
+      const asked = yield* Deferred.make<Permission.Request>()
+      const unsubscribe = yield* bus.listen((event) =>
+        event.type === Permission.Event.Asked.type
+          ? Deferred.succeed(asked, event.data as Permission.Request).pipe(Effect.asVoid)
+          : Effect.void,
+      )
+      yield* Effect.addFinalizer(() => unsubscribe)
+      const pluginHost = yield* PluginHost.make({
+        activate: () => Effect.void,
+        list: () => Effect.succeed([]),
+      }).pipe(
+        Effect.provideService(
+          PluginRuntime.Service,
+          PluginRuntime.Service.of({
+            ...runtime,
+            session,
+          }),
+        ),
+      )
+      const child = yield* pluginHost.session.createChild({
+        parentID: sessionID,
+        agent: Agent.ID.make("reviewer"),
+      })
+      yield* agents.transform((draft) =>
+        draft.update(Agent.ID.make("reviewer"), (agent) => {
+          agent.permissions = [{ action: "approval", resource: "*", effect: "ask" }]
+        }),
+      )
+      yield* session.prompt({ sessionID: child.id, text: "Request approval", resume: false })
+      yield* TestLLM.push(TestLLM.tool("call-approval", "approval", {}), [])
+
+      const execution = yield* session.resume(child.id).pipe(Effect.forkScoped)
+      const result = yield* Effect.raceFirst(
+        Deferred.await(asked).pipe(Effect.map((request) => ({ type: "asked" as const, request }))),
+        Fiber.join(execution).pipe(Effect.as({ type: "completed" as const })),
+      )
+
+      expect(result.type).toBe("asked")
+      if (result.type !== "asked") return
+      expect(result.request).toMatchObject({ sessionID: child.id, action: "approval" })
+      yield* permissions.reply({ requestID: result.request.id, reply: "once" })
+      yield* Fiber.join(execution)
+      expect((yield* session.context(child.id)).at(-1)).toMatchObject({
+        type: "assistant",
+        agent: "reviewer",
+        content: [{ type: "tool", name: "approval", state: { status: "completed" } }],
+      })
+    }),
+  )
+
   it.effect("generates the title while the first model step is still running", () =>
     Effect.gen(function* () {
       const session = yield* setup

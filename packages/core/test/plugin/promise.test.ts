@@ -17,6 +17,8 @@ import { Skill } from "@opencode-ai/core/skill"
 import { Tool } from "@opencode-ai/core/tool"
 import { Provider } from "@opencode-ai/core/provider"
 import { define } from "@opencode-ai/plugin/promise/plugin"
+import type { Context as PromisePluginContext } from "@opencode-ai/plugin/promise/plugin"
+import type { Context as EffectPluginContext } from "@opencode-ai/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode-ai/plugin/effect/session"
 import { testEffect } from "../lib/effect"
 import { PluginTestLayer } from "./fixture"
@@ -24,7 +26,68 @@ import { host as testHost } from "./host"
 
 const it = testEffect(PluginTestLayer)
 
+const assertCreateChildTypes = (promise: PromisePluginContext, effect: EffectPluginContext) => {
+  const parentID = Session.ID.create()
+  void promise.session.createChild({ parentID })
+  void effect.session.createChild({ parentID })
+  // @ts-expect-error parentID is required.
+  void promise.session.createChild({})
+  // @ts-expect-error child IDs are host-selected.
+  void effect.session.createChild({ parentID, id: Session.ID.create() })
+  // @ts-expect-error child Locations are inherited from the parent.
+  void promise.session.createChild({ parentID, location: { directory: "/other" } })
+  // @ts-expect-error child permissions come from the selected agent.
+  void effect.session.createChild({ parentID, permissions: [] })
+  // @ts-expect-error child permission overrides are not accepted.
+  void promise.session.createChild({ parentID, permissionOverrides: [] })
+}
+void assertCreateChildTypes
+
 describe("fromPromise", () => {
+  it.effect("forwards trusted child creation without reinterpretation", () =>
+    Effect.gen(function* () {
+      let seen: unknown
+      const host = testHost({
+        session: {
+          createChild: (input) => {
+            seen = input
+            return Effect.fail(new Error("expected test failure"))
+          },
+        },
+      })
+      const input = {
+        parentID: Session.ID.make("ses_parent"),
+        title: "Delegated child",
+        agent: Agent.ID.make("reviewer"),
+        model: Model.Ref.make({
+          id: Model.ID.make("claude"),
+          providerID: Provider.ID.make("anthropic"),
+          variant: Model.VariantID.make("high"),
+        }),
+      }
+
+      yield* PluginPromise.fromPromise(
+        define({
+          id: "promise-session-child",
+          setup: async (ctx) => {
+            await ctx.session.createChild(input).catch(() => undefined)
+          },
+        }),
+      ).effect(host)
+
+      expect(seen).toEqual({
+        parentID: Session.ID.make(input.parentID),
+        title: input.title,
+        agent: Agent.ID.make(input.agent),
+        model: Model.Ref.make({
+          id: Model.ID.make(input.model.id),
+          providerID: Provider.ID.make(input.model.providerID),
+          variant: input.model.variant === undefined ? undefined : Model.VariantID.make(input.model.variant),
+        }),
+      })
+    }),
+  )
+
   it.effect("registers executable commands and preserves invocation and output", () =>
     Effect.gen(function* () {
       let executor: Command.Executor | undefined

@@ -103,6 +103,7 @@ export function host(overrides: Overrides = {}): Plugin.Context {
     session: {
       hook: overrides.session?.hook ?? (() => Effect.die("unused session.hook")),
       create: overrides.session?.create ?? (() => Effect.die("unused session.create")),
+      createChild: overrides.session?.createChild ?? (() => Effect.die("unused session.createChild")),
       get: overrides.session?.get ?? (() => Effect.die("unused session.get")),
       prompt: overrides.session?.prompt ?? (() => Effect.die("unused session.prompt")),
       generate: overrides.session?.generate ?? (() => Effect.die("unused session.generate")),

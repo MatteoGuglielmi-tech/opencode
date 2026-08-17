@@ -6,14 +6,23 @@ import { Config as ConfigSchema } from "@opencode-ai/schema/config"
 import { Agent } from "@opencode-ai/core/agent"
 import { Bus } from "@opencode-ai/core/bus"
 import { Command } from "@opencode-ai/core/command"
+import { Database } from "@opencode-ai/core/database/database"
+import { EventTable } from "@opencode-ai/core/event/sql"
+import { Location } from "@opencode-ai/core/location"
 import { Plugin } from "@opencode-ai/core/plugin"
 import { PluginHost } from "@opencode-ai/core/plugin/host"
+import { PluginRuntime } from "@opencode-ai/core/plugin/runtime"
+import { Model } from "@opencode-ai/core/model"
+import { Provider } from "@opencode-ai/core/provider"
 import { Session } from "@opencode-ai/core/session"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionInbox } from "@opencode-ai/core/session/inbox"
+import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Tool } from "@opencode-ai/core/tool"
+import { Workspace } from "@opencode-ai/core/workspace"
 import { testEffect } from "./lib/effect"
 import { PluginTestLayer } from "./plugin/fixture"
+import { eq } from "drizzle-orm"
 
 const it = testEffect(PluginTestLayer)
 
@@ -22,6 +31,90 @@ class Secret extends Context.Service<Secret, string>()("@opencode/test/PluginSec
 const versioned = <R>(plugin: EffectPlugin.Plugin<R>, version = "1") => ({ ...plugin, version })
 
 describe("Plugin", () => {
+  it.effect("creates durable children through the ordinary Session lifecycle", () =>
+    Effect.gen(function* () {
+      const plugins = yield* Plugin.Service
+      const runtime = yield* PluginRuntime.Service
+      const sessions = yield* Session.Service
+      const agents = yield* Agent.Service
+      const location = yield* Location.Service
+      const db = (yield* Database.Service).db
+      const host = yield* PluginHost.make(plugins).pipe(
+        Effect.provideService(
+          PluginRuntime.Service,
+          PluginRuntime.Service.of({
+            ...runtime,
+            session: sessions,
+          }),
+        ),
+      )
+      const parent = yield* sessions.create({
+        location: Location.Ref.make({ directory: location.directory, workspaceID: Workspace.ID.make("wrk_parent") }),
+      })
+      const model = Model.Ref.make({
+        id: Model.ID.make("claude"),
+        providerID: Provider.ID.make("anthropic"),
+        variant: Model.VariantID.make("high"),
+      })
+      const permissions = [{ action: "read", resource: "*", effect: "ask" }] as const
+      yield* agents.transform((draft) =>
+        draft.update(Agent.ID.make("build"), (agent) => {
+          agent.permissions = [...permissions]
+        }),
+      )
+      const child = yield* host.session.createChild({
+        parentID: parent.id,
+        title: "Delegated child",
+        agent: Agent.ID.make("build"),
+        model,
+      })
+      const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, child.id)).get().pipe(Effect.orDie)
+      const events = yield* db
+        .select({ type: EventTable.type, data: EventTable.data })
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, child.id))
+        .all()
+        .pipe(Effect.orDie)
+
+      expect(child).toMatchObject({
+        parentID: parent.id,
+        location: parent.location,
+        title: "Delegated child",
+        agent: "build",
+        model,
+      })
+      expect(row).toMatchObject({
+        parent_id: parent.id,
+        directory: parent.location.directory,
+        workspace_id: parent.location.workspaceID ?? null,
+        agent: "build",
+        model,
+      })
+      expect(row?.permission).toBeNull()
+      expect(events).toMatchObject([
+        {
+          type: "session.created.1",
+          data: {
+            parentID: parent.id,
+            location: parent.location,
+            title: "Delegated child",
+            agent: "build",
+            model,
+          },
+        },
+      ])
+      expect((yield* agents.resolve(child.agent))?.permissions).toEqual(permissions)
+
+      const missing = Session.ID.make("ses_missing_parent")
+      expect(yield* host.session.createChild({ parentID: missing }).pipe(Effect.flip)).toEqual(
+        new Session.NotFoundError({ sessionID: missing }),
+      )
+
+      yield* sessions.remove(parent.id)
+      expect(yield* Effect.result(sessions.get(child.id))).toMatchObject({ _tag: "Failure" })
+    }),
+  )
+
   it.effect("owns executable commands across reload, failure, and disable", () =>
     Effect.gen(function* () {
       const plugins = yield* Plugin.Service

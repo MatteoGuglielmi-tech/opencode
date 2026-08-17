@@ -29,6 +29,23 @@ export default Plugin.define({
           resume: false,
         }),
       )
+      yield* ctx.command.register("trace-effect-child", (input) =>
+        Effect.gen(function* () {
+          const child = yield* ctx.session.createChild({
+            parentID: input.sessionID,
+            title: "Effect child",
+            agent: input.agent,
+            model: input.model,
+          })
+          return yield* ctx.session.synthetic({
+            id: input.id,
+            sessionID: child.id,
+            text: JSON.stringify({ invocation: input }),
+            delivery: input.delivery,
+            resume: false,
+          })
+        }),
+      )
       yield* ctx.command.register("trace-cancel", (input) => {
         const file = input.arguments
         return (file ? Effect.promise(() => Bun.write(`${file}.started`, "started")) : Effect.void).pipe(
