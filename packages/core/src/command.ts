@@ -1,8 +1,14 @@
 export * as Command from "./command.js"
 
 import { makeLocationNode } from "@opencode-ai/util/effect/app-node"
-import { Context, Effect, Layer, Schema, Types } from "effect"
+import { Context, Effect, Layer, Schema, Scope, Types } from "effect"
 import { Command } from "@opencode-ai/schema/command"
+import { Agent } from "@opencode-ai/schema/agent"
+import { Model } from "@opencode-ai/schema/model"
+import { PromptInput } from "@opencode-ai/schema/prompt-input"
+import { Session } from "@opencode-ai/schema/session"
+import { SessionInbox } from "@opencode-ai/schema/session-inbox"
+import { SessionMessage } from "@opencode-ai/schema/session-message"
 import { State } from "./state.js"
 import { MCP } from "./mcp/index.js"
 import { Bus } from "./bus.js"
@@ -20,6 +26,23 @@ export { Event } from "@opencode-ai/schema/command"
 export type Evaluation = {
   readonly text: string
 }
+
+export type ExecutionInput = {
+  readonly id?: SessionMessage.ID
+  readonly sessionID: Session.ID
+  readonly command: string
+  readonly arguments?: string
+  readonly agent?: Agent.ID
+  readonly model?: Model.Ref
+  readonly files?: PromptInput.Prompt["files"]
+  readonly agents?: PromptInput.Prompt["agents"]
+  readonly skills?: PromptInput.Prompt["skills"]
+  readonly delivery?: SessionInbox.Delivery
+  readonly resume?: boolean
+}
+
+export type ExecutionResult = SessionInbox.User | SessionInbox.Synthetic
+export type Executor = (input: ExecutionInput) => Effect.Effect<ExecutionResult, unknown>
 
 export type Data = {
   commands: Map<string, Types.DeepMutable<Info>>
@@ -43,6 +66,11 @@ export type Draft = {
 }
 
 export interface Interface extends State.Transformable<Draft> {
+  readonly register: (
+    name: string,
+    execute: Executor,
+  ) => Effect.Effect<{ readonly dispose: Effect.Effect<void> }, never, Scope.Scope>
+  readonly execute: (input: ExecutionInput) => Effect.Effect<ExecutionResult | undefined, EvaluationError>
   readonly get: (name: string) => Effect.Effect<Info | undefined>
   readonly list: () => Effect.Effect<Info[]>
   readonly evaluate: (input: {
@@ -63,6 +91,7 @@ export const layer = (options?: ShellSelect.Options) =>
       const config = yield* Config.Service
       const location = yield* Location.Service
       const global = yield* Global.Service
+      const executors = new Map<string, Executor>()
       const state = State.create<Data, Draft>({
         name: "command",
         initial: () => ({ commands: new Map() }),
@@ -95,6 +124,37 @@ export const layer = (options?: ShellSelect.Options) =>
       return Service.of({
         reload: state.reload,
         transform: state.transform,
+        register: Effect.fn("Command.register")(function* (name, execute) {
+          const scope = yield* Scope.Scope
+          return yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              if (executors.has(name))
+                return yield* Effect.die(new Error(`Command executor already registered: ${name}`))
+              executors.set(name, execute)
+              let active = true
+              const dispose = Effect.sync(() => {
+                if (!active) return
+                active = false
+                if (executors.get(name) === execute) executors.delete(name)
+              })
+              yield* Scope.addFinalizer(scope, dispose)
+              return { dispose }
+            }),
+          )
+        }),
+        execute: Effect.fn("Command.execute")(function* (input) {
+          const executor = executors.get(input.command)
+          if (!executor) return undefined
+          return yield* executor(input).pipe(
+            Effect.mapError(
+              (error) =>
+                new EvaluationError({
+                  command: input.command,
+                  message: error instanceof Error ? error.message : String(error),
+                }),
+            ),
+          )
+        }),
         get: Effect.fn("Command.get")(function* (name) {
           const command = staticCommand(name)
           if (command) return command

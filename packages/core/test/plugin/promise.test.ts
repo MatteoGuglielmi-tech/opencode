@@ -1,8 +1,9 @@
 import { describe, expect } from "bun:test"
 import { Message, SystemPart } from "@opencode-ai/ai"
-import { DateTime, Effect, Schema } from "effect"
+import { DateTime, Effect, Fiber, Schema } from "effect"
 import { Agent } from "@opencode-ai/core/agent"
 import { Catalog } from "@opencode-ai/core/catalog"
+import { Command } from "@opencode-ai/core/command"
 import { Model } from "@opencode-ai/core/model"
 import { Plugin } from "@opencode-ai/core/plugin"
 import { PluginHooks } from "@opencode-ai/core/plugin/hooks"
@@ -12,6 +13,7 @@ import { WebSearch } from "@opencode-ai/core/websearch"
 import { Session } from "@opencode-ai/core/session"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionInbox } from "@opencode-ai/core/session/inbox"
+import { Skill } from "@opencode-ai/core/skill"
 import { Tool } from "@opencode-ai/core/tool"
 import { Provider } from "@opencode-ai/core/provider"
 import { define } from "@opencode-ai/plugin/promise/plugin"
@@ -23,6 +25,116 @@ import { host as testHost } from "./host"
 const it = testEffect(PluginTestLayer)
 
 describe("fromPromise", () => {
+  it.effect("registers executable commands and preserves invocation and output", () =>
+    Effect.gen(function* () {
+      let executor: Command.Executor | undefined
+      let disposed = false
+      const host = testHost({
+        command: {
+          register: (_name, execute) =>
+            Effect.sync(() => {
+              executor = execute
+              return { dispose: Effect.sync(() => (disposed = true)) }
+            }),
+        },
+      })
+      let registration: { readonly dispose: () => Promise<void> } | undefined
+      let seen: unknown
+      yield* PluginPromise.fromPromise(
+        define({
+          id: "promise-command",
+          setup: async (ctx) => {
+            registration = await ctx.command.register("execute", async (input, context) => {
+              seen = { input, signal: context.signal }
+              return {
+                id: "msg_result",
+                sessionID: input.sessionID,
+                timeCreated: 0,
+                type: "synthetic",
+                payload: { text: "executed" },
+                delivery: "queue",
+              }
+            })
+          },
+        }),
+      ).effect(host)
+      const input: Command.ExecutionInput = {
+        sessionID: Session.ID.make("ses_command"),
+        id: SessionMessage.ID.make("msg_command"),
+        command: "execute",
+        arguments: "--exact value",
+        agent: Agent.ID.make("reviewer"),
+        model: Model.Ref.make({
+          id: Model.ID.make("claude"),
+          providerID: Provider.ID.make("anthropic"),
+          variant: Model.VariantID.make("high"),
+        }),
+        files: [{ uri: "file:///tmp/example.ts", name: "example.ts" }],
+        agents: [{ name: "reviewer" }],
+        skills: [{ id: Skill.ID.make("testing") }],
+        delivery: "queue",
+        resume: false,
+      }
+      const activeRegistration = registration
+      if (!executor || !activeRegistration) return yield* Effect.die("command registration missing")
+
+      expect(yield* executor(input)).toEqual(
+        SessionInbox.Synthetic.make({
+          id: SessionMessage.ID.make("msg_result"),
+          sessionID: input.sessionID,
+          timeCreated: DateTime.makeUnsafe(0),
+          type: "synthetic",
+          payload: { text: "executed" },
+          delivery: "queue",
+        }),
+      )
+      expect(seen).toEqual({ input, signal: expect.any(AbortSignal) })
+      yield* Effect.promise(() => activeRegistration.dispose())
+      expect(disposed).toBe(true)
+    }),
+  )
+
+  it.effect("aborts Promise command handlers when execution is interrupted", () =>
+    Effect.gen(function* () {
+      let executor: Command.Executor | undefined
+      let signal: AbortSignal | undefined
+      let startedResolve: () => void = () => {}
+      const started = new Promise<void>((resolve) => (startedResolve = resolve))
+      const host = testHost({
+        command: {
+          register: (_name, execute) =>
+            Effect.sync(() => {
+              executor = execute
+              return { dispose: Effect.void }
+            }),
+        },
+      })
+      yield* PluginPromise.fromPromise(
+        define({
+          id: "promise-command-cancellation",
+          setup: async (ctx) => {
+            await ctx.command.register("wait", async (_input, context) => {
+              signal = context.signal
+              startedResolve()
+              await new Promise<void>((resolve) =>
+                context.signal.addEventListener("abort", () => resolve(), { once: true }),
+              )
+              throw new Error("aborted")
+            })
+          },
+        }),
+      ).effect(host)
+      if (!executor) return yield* Effect.die("command registration missing")
+      const fiber = yield* executor({ sessionID: Session.ID.make("ses_command"), command: "wait" }).pipe(
+        Effect.forkScoped,
+      )
+      yield* Effect.promise(() => started)
+      yield* Fiber.interrupt(fiber)
+
+      expect(signal?.aborted).toBe(true)
+    }),
+  )
+
   it.effect("forwards transient session generation", () =>
     Effect.gen(function* () {
       const host = testHost({

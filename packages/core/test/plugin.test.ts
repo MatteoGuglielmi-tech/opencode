@@ -1,14 +1,16 @@
 import { describe, expect } from "bun:test"
 import { ToolFailure } from "@opencode-ai/ai"
-import { Context, Effect, Exit, Fiber, Schema, Stream } from "effect"
+import { Context, DateTime, Effect, Exit, Fiber, Schema, Stream } from "effect"
 import { Plugin as EffectPlugin } from "@opencode-ai/plugin/effect"
 import { Config as ConfigSchema } from "@opencode-ai/schema/config"
 import { Agent } from "@opencode-ai/core/agent"
 import { Bus } from "@opencode-ai/core/bus"
+import { Command } from "@opencode-ai/core/command"
 import { Plugin } from "@opencode-ai/core/plugin"
 import { PluginHost } from "@opencode-ai/core/plugin/host"
 import { Session } from "@opencode-ai/core/session"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionInbox } from "@opencode-ai/core/session/inbox"
 import { Tool } from "@opencode-ai/core/tool"
 import { testEffect } from "./lib/effect"
 import { PluginTestLayer } from "./plugin/fixture"
@@ -20,6 +22,43 @@ class Secret extends Context.Service<Secret, string>()("@opencode/test/PluginSec
 const versioned = <R>(plugin: EffectPlugin.Plugin<R>, version = "1") => ({ ...plugin, version })
 
 describe("Plugin", () => {
+  it.effect("owns executable commands across reload, failure, and disable", () =>
+    Effect.gen(function* () {
+      const plugins = yield* Plugin.Service
+      const commands = yield* Command.Service
+      const input = { sessionID: Session.ID.make("ses_plugin_command"), command: "managed" }
+      const managed = (text: string, fail = false) =>
+        EffectPlugin.define({
+          id: "command-plugin",
+          effect: (ctx) =>
+            Effect.gen(function* () {
+              yield* ctx.command.register("managed", () =>
+                Effect.succeed(
+                  SessionInbox.Synthetic.make({
+                    id: SessionMessage.ID.make(`msg_${text}`),
+                    sessionID: input.sessionID,
+                    timeCreated: DateTime.makeUnsafe(0),
+                    type: "synthetic",
+                    payload: { text },
+                    delivery: "queue",
+                  }),
+                ),
+              )
+              if (fail) yield* Effect.die(new Error("activation failed"))
+            }),
+        })
+
+      yield* plugins.activate([versioned(managed("first"), "1")])
+      expect((yield* commands.execute(input))?.payload.text).toBe("first")
+      yield* plugins.activate([versioned(managed("second"), "2")])
+      expect((yield* commands.execute(input))?.payload.text).toBe("second")
+      yield* plugins.activate([versioned(managed("failed", true), "3")])
+      expect((yield* commands.execute(input))?.payload.text).toBe("second")
+      yield* plugins.activate([])
+      expect(yield* commands.execute(input)).toBeUndefined()
+    }),
+  )
+
   it.live("exposes public events through the plugin context", () =>
     Effect.gen(function* () {
       const plugins = yield* Plugin.Service

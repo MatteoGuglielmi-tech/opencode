@@ -12,7 +12,8 @@ import { AbsolutePath } from "@opencode-ai/core/schema"
 import { WebSearch } from "@opencode-ai/core/websearch"
 import { Effect, Stream } from "effect"
 
-type Overrides = Partial<Omit<Plugin.Context, "options" | "session">> & {
+type Overrides = Partial<Omit<Plugin.Context, "options" | "command" | "session">> & {
+  readonly command?: Partial<Plugin.Context["command"]>
   readonly session?: Partial<Plugin.Context["session"]>
 }
 export function host(overrides: Overrides = {}): Plugin.Context {
@@ -40,10 +41,11 @@ export function host(overrides: Overrides = {}): Plugin.Context {
       transform: () => Effect.die("unused catalog.transform"),
       reload: () => Effect.die("unused catalog.reload"),
     },
-    command: overrides.command ?? {
-      list: () => Effect.die("unused command.list"),
-      transform: () => Effect.die("unused command.transform"),
-      reload: () => Effect.die("unused command.reload"),
+    command: {
+      list: overrides.command?.list ?? (() => Effect.die("unused command.list")),
+      register: overrides.command?.register ?? (() => Effect.die("unused command.register")),
+      transform: overrides.command?.transform ?? (() => Effect.die("unused command.transform")),
+      reload: overrides.command?.reload ?? (() => Effect.die("unused command.reload")),
     },
     event: overrides.event ?? {
       subscribe: () => Stream.empty,

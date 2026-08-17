@@ -3795,7 +3795,7 @@ export type SessionCommandInput = {
   }["resume"]
 }
 
-export type SessionCommandOutput = { data: SessionInboxUser }["data"]
+export type SessionCommandOutput = { data: SessionInboxUser | SessionInboxSynthetic }["data"]
 
 export type SessionSkillInput = {
   readonly sessionID: { readonly sessionID: string }["sessionID"]

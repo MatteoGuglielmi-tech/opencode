@@ -1,7 +1,11 @@
-import type { CommandApi } from "@opencode-ai/client/effect/api"
+import type { CommandApi, SessionCommandOperation } from "@opencode-ai/client/effect/api"
 import type { CommandInfo } from "@opencode-ai/client"
-import type { Effect } from "effect"
-import type { Transform } from "./registration.js"
+import type { Effect, Scope } from "effect"
+import type { Registration, Transform } from "./registration.js"
+
+export type CommandExecutionInput = Parameters<SessionCommandOperation>[0]
+export type CommandExecutionResult = Effect.Success<ReturnType<SessionCommandOperation>>
+export type CommandExecutor<E = never> = SessionCommandOperation<E>
 
 export interface CommandDraft {
   list(): readonly CommandInfo[]
@@ -11,6 +15,10 @@ export interface CommandDraft {
 }
 
 export interface CommandDomain extends CommandApi<unknown> {
+  readonly register: <E = never>(
+    name: string,
+    execute: CommandExecutor<E>,
+  ) => Effect.Effect<Registration, never, Scope.Scope>
   readonly transform: Transform<CommandDraft>
   readonly reload: () => Effect.Effect<void>
 }

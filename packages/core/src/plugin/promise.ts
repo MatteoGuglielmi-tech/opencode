@@ -2,6 +2,7 @@ export * as PluginPromise from "./promise.js"
 
 import { define } from "@opencode-ai/plugin/effect/plugin"
 import type { Context, Plugin } from "@opencode-ai/plugin/promise/plugin"
+import type { CommandExecutionResult } from "@opencode-ai/plugin/promise/command"
 import type { Info } from "@opencode-ai/plugin/promise/tool"
 import { Agent } from "@opencode-ai/schema/agent"
 import { Integration } from "@opencode-ai/schema/integration"
@@ -10,11 +11,12 @@ import { Model } from "@opencode-ai/schema/model"
 import { Provider } from "@opencode-ai/schema/provider"
 import { AbsolutePath } from "@opencode-ai/schema/schema"
 import { Session } from "@opencode-ai/schema/session"
+import { SessionInbox } from "@opencode-ai/schema/session-inbox"
 import { SessionMessage } from "@opencode-ai/schema/session-message"
 import { Skill } from "@opencode-ai/schema/skill"
 import { Workspace } from "@opencode-ai/schema/workspace"
 import { WebSearch } from "@opencode-ai/schema/websearch"
-import { DateTime, Effect, Scope, Stream } from "effect"
+import { DateTime, Effect, Schema, Scope, Stream } from "effect"
 import { Tool } from "../tool.js"
 
 type HostRegistration = { readonly dispose: Effect.Effect<void> }
@@ -87,6 +89,12 @@ export function fromPromise(plugin: Plugin) {
           },
           command: {
             list: (input) => run(host.command.list(input)),
+            register: (name, execute) =>
+              register(
+                host.command.register(name, (input) =>
+                  attempt((signal) => execute(wire(input), { signal })).pipe(Effect.map(commandResult)),
+                ),
+              ),
             transform: transform(host.command),
             reload: () => run(host.command.reload()),
           },
@@ -354,6 +362,12 @@ function model(input: { readonly id: string; readonly providerID: string; readon
     providerID: Provider.ID.make(input.providerID),
     variant: input.variant === undefined ? undefined : Model.VariantID.make(input.variant),
   })
+}
+
+function commandResult(input: CommandExecutionResult) {
+  const value: unknown = JSON.parse(JSON.stringify(input))
+  if (input.type === "user") return Schema.decodeUnknownSync(SessionInbox.User)(value)
+  return Schema.decodeUnknownSync(SessionInbox.Synthetic)(value)
 }
 
 type Wire<Value> = unknown extends Value

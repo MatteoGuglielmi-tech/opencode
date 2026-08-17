@@ -3,10 +3,11 @@ import path from "path"
 import { describe, expect } from "bun:test"
 import { Config } from "@opencode-ai/schema/config"
 import { Money } from "@opencode-ai/schema/money"
-import { DateTime, Deferred, Effect, Equal, Fiber, Hash, RcMap, Schema, Stream } from "effect"
+import { Context, DateTime, Deferred, Effect, Equal, Exit, Fiber, Hash, RcMap, Schema, Scope, Stream } from "effect"
 import { Plugin as EffectPlugin } from "@opencode-ai/plugin/effect"
 import { Agent } from "@opencode-ai/core/agent"
 import { Catalog } from "@opencode-ai/core/catalog"
+import { Command } from "@opencode-ai/core/command"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/util/effect/layer-node"
 import { Global } from "@opencode-ai/util/global"
@@ -20,6 +21,8 @@ import { Project } from "@opencode-ai/core/project"
 import { Provider } from "@opencode-ai/core/provider"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Session } from "@opencode-ai/core/session"
+import { SessionInbox } from "@opencode-ai/core/session/inbox"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
 import { tmpdir } from "./fixture/tmpdir"
 import { tempGlobalLayer } from "./fixture/global"
@@ -69,6 +72,50 @@ describe("LocationServiceMap", () => {
           expect(yield* read.pipe(Effect.scoped, Effect.provide(locations.get(ref)))).toBeDefined()
           yield* locations.invalidate(ref)
           expect(yield* read.pipe(Effect.scoped, Effect.provide(locations.get(ref)))).toBeDefined()
+        }),
+      ),
+    ),
+  )
+
+  itWithSdk.live("disposes executable commands when a Location is invalidated", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (dir) => Effect.promise(() => dir[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((dir) =>
+        Effect.gen(function* () {
+          const sdk = yield* SdkPlugins.Service
+          const locations = yield* LocationServiceMap.Service
+          const ref = Location.Ref.make({ directory: AbsolutePath.make(dir.path) })
+          const input = {
+            sessionID: Session.ID.make("ses_location_cleanup"),
+            command: "location-cleanup",
+          }
+          const output = SessionInbox.Synthetic.make({
+            id: SessionMessage.ID.make("msg_location_cleanup"),
+            sessionID: input.sessionID,
+            timeCreated: DateTime.makeUnsafe(0),
+            type: "synthetic",
+            payload: { text: "active" },
+            delivery: "queue",
+          })
+          yield* sdk.register(
+            EffectPlugin.define({
+              id: "location-cleanup-plugin",
+              effect: (ctx) => ctx.command.register(input.command, () => Effect.succeed(output)).pipe(Effect.asVoid),
+            }),
+          )
+
+          const scope = yield* Scope.make()
+          yield* Effect.addFinalizer((exit) => Scope.close(scope, exit))
+          const context = yield* locations.contextEffect(ref).pipe(Effect.provideService(Scope.Scope, scope))
+          yield* PluginSupervisor.Service.use((supervisor) => supervisor.flush).pipe(Effect.provide(context))
+          const commands = Context.get(context, Command.Service)
+          expect(yield* commands.execute(input)).toEqual(output)
+
+          yield* locations.invalidate(ref)
+          yield* Scope.close(scope, Exit.void)
+          expect(yield* commands.execute(input)).toBeUndefined()
         }),
       ),
     ),

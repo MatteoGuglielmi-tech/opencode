@@ -202,7 +202,7 @@ export type Endpoint5_13Input = {
   readonly delivery?: SessionInbox.Delivery | undefined
   readonly resume?: boolean | undefined
 }
-export type Endpoint5_13Output = SessionInbox.User
+export type Endpoint5_13Output = SessionInbox.User | SessionInbox.Synthetic
 export type SessionCommandOperation<E = never> = (input: Endpoint5_13Input) => Effect.Effect<Endpoint5_13Output, E>
 
 export type Endpoint5_14Input = {

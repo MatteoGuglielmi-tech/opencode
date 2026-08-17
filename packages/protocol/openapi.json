@@ -1902,7 +1902,14 @@
                   "type": "object",
                   "properties": {
                     "data": {
-                      "$ref": "#/components/schemas/Session.Inbox.User"
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Session.Inbox.User"
+                        },
+                        {
+                          "$ref": "#/components/schemas/Session.Inbox.Synthetic"
+                        }
+                      ]
                     }
                   },
                   "required": ["data"],
@@ -1979,7 +1986,7 @@
             }
           }
         },
-        "description": "Resolve a slash command into prompt input, admit it durably, and schedule execution unless resume is false.",
+        "description": "Run a scoped executor or resolve a slash command into durable session input, scheduling execution unless resume is false.",
         "summary": "Run command",
         "requestBody": {
           "content": {
@@ -13936,57 +13943,6 @@
         "required": ["id", "sessionID", "timeCreated", "type", "payload", "delivery"],
         "additionalProperties": false
       },
-      "CommandNotFoundError": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": ["CommandNotFoundError"]
-          },
-          "command": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": ["_tag", "command", "message"],
-        "additionalProperties": false
-      },
-      "CommandEvaluationError": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": ["CommandEvaluationError"]
-          },
-          "command": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": ["_tag", "command", "message"],
-        "additionalProperties": false
-      },
-      "SkillNotFoundError": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": ["SkillNotFoundError"]
-          },
-          "skill": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": ["_tag", "skill", "message"],
-        "additionalProperties": false
-      },
       "Session.Inbox.SyntheticPayload": {
         "type": "object",
         "properties": {
@@ -14037,6 +13993,57 @@
           }
         },
         "required": ["id", "sessionID", "timeCreated", "type", "payload", "delivery"],
+        "additionalProperties": false
+      },
+      "CommandNotFoundError": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["CommandNotFoundError"]
+          },
+          "command": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "command", "message"],
+        "additionalProperties": false
+      },
+      "CommandEvaluationError": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["CommandEvaluationError"]
+          },
+          "command": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "command", "message"],
+        "additionalProperties": false
+      },
+      "SkillNotFoundError": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["SkillNotFoundError"]
+          },
+          "skill": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "skill", "message"],
         "additionalProperties": false
       },
       "Session.Inbox.CompactionPayload": {

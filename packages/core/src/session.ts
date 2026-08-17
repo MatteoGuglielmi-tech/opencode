@@ -227,20 +227,8 @@ export interface Interface {
     sessionID: SessionSchema.ID
     prompt: string
   }) => Effect.Effect<string, NotFoundError | SessionGenerate.Error>
-  readonly command: (input: {
-    id?: SessionMessage.ID
-    sessionID: SessionSchema.ID
-    command: string
-    arguments?: string
-    agent?: Agent.ID
-    model?: Model.Ref
-    files?: PromptInput.Prompt["files"]
-    agents?: PromptInput.Prompt["agents"]
-    skills?: PromptInput.Prompt["skills"]
-    delivery?: SessionInbox.Delivery
-    resume?: boolean
-  }) => Effect.Effect<
-    SessionInbox.User,
+  readonly command: (input: Command.ExecutionInput) => Effect.Effect<
+    Command.ExecutionResult,
     | NotFoundError
     | PromptConflictError
     | AttachmentError
@@ -600,6 +588,8 @@ const layer = Layer.effect(
       command: Effect.fn("Session.command")(function* (input) {
         const session = yield* result.get(input.sessionID)
         const commands = yield* Command.Service.pipe(Effect.provide(locations.get(session.location)))
+        const executed = yield* commands.execute(input)
+        if (executed) return executed
         const command = yield* commands.get(input.command)
         if (!command)
           return yield* new Command.NotFoundError({

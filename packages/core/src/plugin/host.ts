@@ -173,6 +173,7 @@ export const make = Effect.fn("PluginHost.make")(function* (plugin: import("../p
     },
     command: {
       list: () => response(commands.list()),
+      register: commands.register,
       reload: commands.reload,
       transform: (callback) =>
         commands.transform((draft) => {

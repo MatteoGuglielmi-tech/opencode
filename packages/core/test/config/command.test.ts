@@ -69,6 +69,7 @@ Review files`,
             host({
               command: {
                 list: () => Effect.die("unused command.list"),
+                register: command.register,
                 transform: command.transform,
                 reload: command.reload,
               },
@@ -135,6 +136,7 @@ Review files`,
               host({
                 command: {
                   list: () => Effect.die("unused command.list"),
+                  register: command.register,
                   transform: command.transform,
                   reload: command.reload,
                 },
@@ -180,6 +182,7 @@ Review files`,
             host({
               command: {
                 list: () => Effect.die("unused command.list"),
+                register: command.register,
                 transform: command.transform,
                 reload: () => command.reload().pipe(Effect.tap(() => Effect.sync(() => reloads++))),
               },
@@ -220,6 +223,7 @@ Review files`,
             host({
               command: {
                 list: () => Effect.die("unused command.list"),
+                register: command.register,
                 transform: command.transform,
                 reload: () => command.reload().pipe(Effect.tap(() => Effect.sync(() => reloads++))),
               },
@@ -264,6 +268,7 @@ describeNative("ConfigCommandPlugin native watcher", () => {
           host({
             command: {
               list: () => Effect.die("unused command.list"),
+              register: command.register,
               transform: command.transform,
               reload: command.reload,
             },

@@ -25,6 +25,7 @@ describe("CommandPlugin.Plugin", () => {
         host({
           command: {
             list: () => Effect.die("unused command.list"),
+            register: command.register,
             transform: command.transform,
             reload: command.reload,
           },

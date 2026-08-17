@@ -349,7 +349,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
           delivery: SessionInbox.Delivery.pipe(Schema.optional),
           resume: Schema.Boolean.pipe(Schema.optional),
         }),
-        success: Schema.Struct({ data: SessionInbox.User }),
+        success: Schema.Struct({ data: Schema.Union([SessionInbox.User, SessionInbox.Synthetic]) }),
         error: [ConflictError, InvalidRequestError, SessionNotFoundError, CommandNotFoundError, CommandEvaluationError],
       })
         .middleware(sessionLocationMiddleware)
@@ -358,7 +358,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S>(sessionLo
             identifier: "v2.session.command",
             summary: "Run command",
             description:
-              "Resolve a slash command into prompt input, admit it durably, and schedule execution unless resume is false.",
+              "Run a scoped executor or resolve a slash command into durable session input, scheduling execution unless resume is false.",
           }),
         ),
     )
