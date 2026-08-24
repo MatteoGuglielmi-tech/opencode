@@ -357,7 +357,12 @@ export const make = Effect.fn("PluginHost.make")(function* (plugin: import("../p
           model: input.model,
         }),
       get: (input) => runtime.session.get(input.sessionID),
+      messages: runtime.session.messages,
       prompt: runtime.session.prompt,
+      resume: (input) => runtime.session.resume(input.sessionID),
+      inbox: {
+        cancel: (input) => runtime.session.cancelInbox(input),
+      },
       generate: (input) => runtime.session.generate(input).pipe(Effect.map((text) => ({ text }))),
       command: runtime.session.command,
       rename: runtime.session.rename,

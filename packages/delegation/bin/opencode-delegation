@@ -1,0 +1,13 @@
+#!/usr/bin/env bun
+
+import { developmentConfig } from "../src/distribution.ts"
+
+const profile = process.argv[2]
+const concurrency = Number(process.argv[3] ?? "6")
+
+if (!profile) {
+  console.error("usage: opencode-delegation <profile-directory> [concurrency]")
+  process.exit(1)
+}
+
+console.log(JSON.stringify(await developmentConfig({ profile, concurrency }), null, 2))

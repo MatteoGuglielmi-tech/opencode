@@ -1,5 +1,5 @@
 import type { SessionApi } from "@opencode-ai/client/promise/api"
-import type { ModelRef } from "@opencode-ai/client"
+import type { ModelRef, SessionMessageInfo } from "@opencode-ai/client"
 import type { Message, SystemPart } from "@opencode-ai/ai"
 import type { Agent } from "@opencode-ai/schema/agent"
 import type { Model } from "@opencode-ai/schema/model"
@@ -47,5 +47,12 @@ export interface CreateChildInput {
 export interface SessionDomain
   extends Pick<SessionApi, "create" | "get" | "prompt" | "generate" | "command" | "synthetic" | "interrupt"> {
   readonly createChild: (input: CreateChildInput) => ReturnType<SessionApi["create"]>
+  readonly messages: (input: {
+    readonly sessionID: string
+    readonly limit?: number
+    readonly order?: "asc" | "desc"
+  }) => Promise<ReadonlyArray<SessionMessageInfo>>
+  readonly resume: (input: { readonly sessionID: string }) => Promise<void>
+  readonly inbox: Pick<SessionApi["inbox"], "cancel">
   readonly hook: Hooks<SessionHooks>
 }

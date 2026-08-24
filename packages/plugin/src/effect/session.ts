@@ -3,7 +3,8 @@ import type { Message, SystemPart } from "@opencode-ai/ai"
 import type { Agent } from "@opencode-ai/schema/agent"
 import type { Model } from "@opencode-ai/schema/model"
 import type { Session } from "@opencode-ai/schema/session"
-import type { JsonSchema } from "effect"
+import type { SessionMessage } from "@opencode-ai/schema/session-message"
+import type { Effect, JsonSchema } from "effect"
 import type { Hooks } from "./registration.js"
 
 export interface SessionContext {
@@ -49,5 +50,12 @@ export interface SessionDomain
     "create" | "get" | "prompt" | "generate" | "command" | "synthetic" | "interrupt" | "rename" | "wait"
   > {
   readonly createChild: (input: CreateChildInput) => ReturnType<SessionApi<unknown>["create"]>
+  readonly messages: (input: {
+    readonly sessionID: Session.ID
+    readonly limit?: number
+    readonly order?: "asc" | "desc"
+  }) => Effect.Effect<ReadonlyArray<SessionMessage.Info>, unknown>
+  readonly resume: (input: { readonly sessionID: Session.ID }) => ReturnType<SessionApi<unknown>["wait"]>
+  readonly inbox: Pick<SessionApi<unknown>["inbox"], "cancel">
   readonly hook: Hooks<SessionHooks>
 }

@@ -15,6 +15,7 @@ export interface Interface {
     | "create"
     | "messages"
     | "prompt"
+    | "cancelInbox"
     | "generate"
     | "command"
     | "rename"
@@ -60,6 +61,7 @@ export const layerWithCell = (cell: Cell) =>
         create: (input) => require(cell, (runtime) => runtime.session.create(input)),
         messages: (input) => require(cell, (runtime) => runtime.session.messages(input)),
         prompt: (input) => require(cell, (runtime) => runtime.session.prompt(input)),
+        cancelInbox: (input) => require(cell, (runtime) => runtime.session.cancelInbox(input)),
         generate: (input) => require(cell, (runtime) => runtime.session.generate(input)),
         command: (input) => require(cell, (runtime) => runtime.session.command(input)),
         rename: (input) => require(cell, (runtime) => runtime.session.rename(input)),

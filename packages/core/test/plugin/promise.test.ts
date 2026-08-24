@@ -219,6 +219,30 @@ describe("fromPromise", () => {
     }),
   )
 
+  it.effect("forwards session message reads", () =>
+    Effect.gen(function* () {
+      let seen: unknown
+      const host = testHost({
+        session: {
+          messages: (input) => {
+            seen = input
+            return Effect.succeed([])
+          },
+        },
+      })
+
+      yield* PluginPromise.fromPromise(
+        define({
+          id: "promise-session-messages",
+          setup: async (ctx) => {
+            expect(await ctx.session.messages({ sessionID: "ses_session", order: "desc", limit: 1 })).toEqual([])
+          },
+        }),
+      ).effect(host)
+      expect(seen).toEqual({ sessionID: "ses_session", order: "desc", limit: 1 })
+    }),
+  )
+
   it.effect("forwards synthetic session input", () =>
     Effect.gen(function* () {
       const input = {

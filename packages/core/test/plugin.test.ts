@@ -31,6 +31,25 @@ class Secret extends Context.Service<Secret, string>()("@opencode/test/PluginSec
 const versioned = <R>(plugin: EffectPlugin.Plugin<R>, version = "1") => ({ ...plugin, version })
 
 describe("Plugin", () => {
+  it.effect("resumes execution and cancels pending inbox work through the Effect plugin boundary", () =>
+    Effect.gen(function* () {
+      const plugins = yield* Plugin.Service
+      const runtime = yield* PluginRuntime.Service
+      const sessions = yield* Session.Service
+      const location = yield* Location.Service
+      const host = yield* PluginHost.make(plugins).pipe(
+        Effect.provideService(PluginRuntime.Service, PluginRuntime.Service.of({ ...runtime, session: sessions })),
+      )
+      const session = yield* sessions.create({ location: Location.Ref.make({ directory: location.directory }) })
+      const pending = yield* sessions.prompt({ sessionID: session.id, text: "pending", resume: false })
+
+      yield* host.session.inbox.cancel({ sessionID: session.id, inboxID: pending.id })
+      yield* host.session.resume({ sessionID: session.id })
+
+      expect(yield* sessions.inbox(session.id)).toEqual([])
+    }),
+  )
+
   it.effect("creates durable children through the ordinary Session lifecycle", () =>
     Effect.gen(function* () {
       const plugins = yield* Plugin.Service

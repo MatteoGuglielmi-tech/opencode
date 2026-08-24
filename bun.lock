@@ -406,6 +406,23 @@
         "drizzle-kit": "catalog:",
       },
     },
+    "packages/delegation": {
+      "name": "@opencode-ai/delegation",
+      "version": "0.0.0",
+      "bin": {
+        "opencode-delegation": "./bin/opencode-delegation",
+      },
+      "dependencies": {
+        "@opencode-ai/plugin": "workspace:*",
+        "@opencode-ai/schema": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@tsconfig/bun": "catalog:",
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
     "packages/desktop": {
       "name": "@opencode-ai/desktop",
       "version": "1.18.15",
@@ -2112,6 +2129,8 @@
     "@opencode-ai/console-support": ["@opencode-ai/console-support@workspace:packages/console/support"],
 
     "@opencode-ai/core": ["@opencode-ai/core@workspace:packages/core"],
+
+    "@opencode-ai/delegation": ["@opencode-ai/delegation@workspace:packages/delegation"],
 
     "@opencode-ai/desktop": ["@opencode-ai/desktop@workspace:packages/desktop"],
 

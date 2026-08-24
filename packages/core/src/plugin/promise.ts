@@ -308,6 +308,7 @@ export function fromPromise(plugin: Plugin) {
                 }),
               ),
             get: (input) => run(host.session.get({ sessionID: Session.ID.make(input.sessionID) })),
+            messages: (input) => run(host.session.messages({ ...input, sessionID: Session.ID.make(input.sessionID) })),
             prompt: (input) =>
               run(
                 host.session.prompt({
@@ -319,6 +320,16 @@ export function fromPromise(plugin: Plugin) {
                   resume: input.resume ?? undefined,
                 }),
               ),
+            resume: (input) => run(host.session.resume({ sessionID: Session.ID.make(input.sessionID) })),
+            inbox: {
+              cancel: (input) =>
+                run(
+                  host.session.inbox.cancel({
+                    sessionID: Session.ID.make(input.sessionID),
+                    inboxID: SessionMessage.ID.make(input.inboxID),
+                  }),
+                ),
+            },
             generate: (input) =>
               run(host.session.generate({ sessionID: Session.ID.make(input.sessionID), prompt: input.prompt })),
             command: (input) =>
