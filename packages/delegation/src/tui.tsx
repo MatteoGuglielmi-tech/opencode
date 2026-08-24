@@ -1,17 +1,17 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode-ai/plugin/tui"
 import type { Context, Destination, Route } from "@opencode-ai/plugin/tui/context"
-import { createEffect, createMemo, createResource, createSignal, For, Match, Show, Switch } from "solid-js"
+import type { PermissionRequest } from "@opencode-ai/client"
+import { batch, createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import {
-  initialFailure,
   loadSupervision,
   loadSupervisionPage,
   mergeHistoryPage,
-  reconcileHistoryRefresh,
   type ProjectedOperation,
   supervisionView,
   type WorkspaceResult,
 } from "./supervision.js"
+import { createSupervisionSynchronization, type SynchronizationFailure } from "./synchronization.js"
 import {
   locationIdentity,
   reconcilePresentationState,
@@ -67,18 +67,9 @@ function SupervisionPage(props: {
     return typeof value === "string" ? value : undefined
   }
   const [current, setCurrent] = createSignal<WorkspaceResult>()
-  const [refreshRequest, setRefreshRequest] = createSignal<{
-    readonly generation: number
-    readonly history: ReadonlyArray<{
-      readonly parentID: string
-      readonly limit: number
-      readonly operationID?: string
-    }>
-  }>()
-  const [workspace] = createResource(
-    () => ({ entrySessionID: entry(), refresh: refreshRequest() }),
-    (input) => loadSupervision(props.context.client, input.entrySessionID, input.refresh),
-  )
+  const [freshness, setFreshness] = createSignal<"loading" | "live" | "stale" | "degraded">("loading")
+  const [refreshFailure, setRefreshFailure] = createSignal<SynchronizationFailure>()
+  const [permissions, setPermissions] = createSignal<ReadonlyMap<string, ReadonlyArray<PermissionRequest>>>(new Map())
   const location = props.context.location ?? props.context.data.location.default()
   const memoryKey = locationIdentity(location)
   const restored = sanitizePresentationState(props.memory.locations[memoryKey], props.context.renderer.terminalWidth)
@@ -95,24 +86,46 @@ function SupervisionPage(props: {
   }>()
   const [loadingParent, setLoadingParent] = createSignal<string>()
   const [paging, setPaging] = createSignal(false)
-  createEffect(() => {
-    const result = workspace()
-    if (!result) return
-    setCurrent((value) =>
-      value?.type === "workspace" && result.type === "workspace" ? reconcileHistoryRefresh(value, result) : result,
-    )
+  const synchronization = createSupervisionSynchronization<PermissionRequest>({
+    load: (request) => loadSupervision(props.context.client, entry(), request),
+    permissions: async (childIDs) => {
+      await Promise.all(childIDs.map((sessionID) => props.context.data.session.permission.sync(sessionID)))
+      return new Map(
+        childIDs.map((sessionID) => [sessionID, [...(props.context.data.session.permission.list(sessionID) ?? [])]]),
+      )
+    },
+    publish(state) {
+      batch(() => {
+        setFreshness(state.freshness)
+        setRefreshFailure(state.freshness === "stale" ? state.failure : undefined)
+        if (!state.combined) return
+        setPermissions(state.combined.permissions)
+        setCurrent(state.combined.workspace)
+      })
+    },
   })
-  const failure = createMemo(() => (workspace.error ? initialFailure(workspace.error) : undefined))
+  synchronization.start()
+  const stopEvents = props.context.data.listen((event) => {
+    if (
+      event.details.type === "server.connected" ||
+      event.details.type.startsWith("session.") ||
+      event.details.type.startsWith("permission.")
+    )
+      synchronization.request()
+  })
+  const onFocus = () => synchronization.request()
+  props.context.renderer.on("focus", onFocus)
+  onCleanup(() => {
+    synchronization.stop()
+    stopEvents()
+    props.context.renderer.off("focus", onFocus)
+  })
   const view = createMemo(() =>
-    supervisionView(current(), failure(), {
+    supervisionView(current(), undefined, {
       search: search(),
       actionableOnly: actionableOnly(),
     }),
   )
-  const failed = createMemo(() => {
-    const current = view()
-    if (current.type === "failure") return current
-  })
   const ready = createMemo(() => {
     const current = view()
     if (current.type === "ready") return current
@@ -131,6 +144,10 @@ function SupervisionPage(props: {
     return result?.type === "workspace" ? result.observedAt : 0
   })
   const selectedOperationKey = createMemo(() => selectedOperation()?.id)
+  const selectedPermissions = createMemo(() => {
+    const childID = selectedOperation()?.childID
+    return childID ? (permissions().get(childID) ?? []) : []
+  })
   const health = createMemo(() => {
     const result = current()
     if (result?.type === "workspace" && result.health.status === "degraded") return result.health
@@ -165,7 +182,7 @@ function SupervisionPage(props: {
     const result = current()
     if (result?.type !== "workspace") return
     const available = result.parents.filter((parent) => parent.nextCursor)
-    if (available.length === 0 || paging() || workspace.loading) return
+    if (available.length === 0 || paging()) return
     setPaging(true)
     const parentID =
       available.length === 1
@@ -188,21 +205,28 @@ function SupervisionPage(props: {
     const cursor =
       failed?.parentID === parent.session.id && failed.cursor === parent.nextCursor ? failed.cursor : parent.nextCursor
     setLoadingParent(parent.session.id)
-    try {
-      const page = await loadSupervisionPage(props.context.client, {
-        generation: result.generation,
-        parentID: parent.session.id,
-        cursor,
-        limit: Math.max(1, parent.operations.length),
+    return synchronization
+      .serialize(async () => {
+        const latest = current()
+        if (latest?.type !== "workspace") return
+        const latestParent = latest.parents.find((candidate) => candidate.session.id === parent.session.id)
+        if (!latestParent?.nextCursor) return
+        const page = await loadSupervisionPage(props.context.client, {
+          generation: latest.generation,
+          parentID: latestParent.session.id,
+          cursor: latestParent.nextCursor,
+          limit: Math.max(1, latestParent.operations.length),
+        })
+        setCurrent((value) => (value?.type === "workspace" ? mergeHistoryPage(value, page) : value))
       })
-      setCurrent((value) => (value?.type === "workspace" ? mergeHistoryPage(value, page) : value))
-      setPaginationFailure(undefined)
-    } catch {
-      setPaginationFailure({ parentID: parent.session.id, cursor })
-    } finally {
-      setLoadingParent(undefined)
-      setPaging(false)
-    }
+      .then(
+        () => setPaginationFailure(undefined),
+        () => setPaginationFailure({ parentID: parent.session.id, cursor }),
+      )
+      .finally(() => {
+        setLoadingParent(undefined)
+        setPaging(false)
+      })
   }
   const theme = props.context.theme
 
@@ -236,18 +260,7 @@ function SupervisionPage(props: {
         title: "Refresh Delegation supervision",
         bind: "ctrl+r",
         run() {
-          const result = current()
-          if (result?.type !== "workspace" || paging() || workspace.loading) return
-          setRefreshRequest({
-            generation: result.generation + 1,
-            history: result.parents.map((parent) => ({
-              parentID: parent.session.id,
-              limit: Math.max(1, parent.operations.length),
-              ...(parent.session.id === result.focus?.parentID && result.focus.operationID
-                ? { operationID: result.focus.operationID }
-                : {}),
-            })),
-          })
+          synchronization.request()
         },
       },
       {
@@ -286,10 +299,23 @@ function SupervisionPage(props: {
       <text fg={theme.text.subdued}>
         Search: {search() || "all"} (Ctrl+F) | {actionableOnly() ? "actionable only" : "all states"} (Ctrl+A)
       </text>
+      <Show when={freshness() !== "loading"}>
+        <text fg={freshness() === "live" ? theme.text.subdued : theme.text.feedback.warning.default}>
+          {freshness() === "live" ? "Live" : freshness() === "stale" ? "Stale" : "Degraded"}
+        </text>
+      </Show>
       <Show when={health()}>
-        <text fg={theme.text.feedback.warning.default}>Degraded coordinator data: {health()?.reason}</text>
+        <text fg={theme.text.feedback.warning.default}>
+          Degraded coordinator data: {health()?.reason}. {healthGuidance(health()?.reason)}
+        </text>
       </Show>
       <Switch>
+        <Match when={freshness() === "stale" && !current()}>
+          <text fg={theme.text.feedback.error.default}>
+            Delegation supervision is unavailable: {refreshFailure()?.code ?? "invalid_response"}.{" "}
+            {failureGuidance(refreshFailure()?.code)}
+          </text>
+        </Match>
         <Match when={view().type === "loading"}>
           <text fg={theme.text.subdued}>Loading delegation workspace...</text>
         </Match>
@@ -301,9 +327,6 @@ function SupervisionPage(props: {
         </Match>
         <Match when={view().type === "unsupported-version"}>
           <text fg={theme.text.feedback.warning.default}>This Delegation supervision version is not supported.</text>
-        </Match>
-        <Match when={failed()}>
-          <text fg={theme.text.feedback.error.default}>Delegation supervision is unavailable: {failed()?.code}</text>
         </Match>
         <Match when={ready()}>
           <For each={ready()?.parents ?? []}>
@@ -354,6 +377,9 @@ function SupervisionPage(props: {
                 <For each={operationInspector(operation(), observedAt())}>
                   {(line) => <text fg={theme.text.subdued}>{line}</text>}
                 </For>
+                <Show when={operation().childID}>
+                  <text fg={theme.text.subdued}>Open permission requests: {selectedPermissions().length}</text>
+                </Show>
               </box>
             )}
           </Show>
@@ -419,6 +445,25 @@ export function operationInspector(operation: ProjectedOperation, observedAt: nu
 
 function duration(label: string, start: number, end: number) {
   return `${label} ${Math.max(0, end - start)}ms`
+}
+
+function failureGuidance(code: SynchronizationFailure["code"] | undefined) {
+  if (code === "plugin_unavailable") return "Enable the Delegation plugin for this Location, then refresh."
+  if (code === "query_unavailable") return "Use a Delegation plugin version that supports this supervision query."
+  if (code === "invalid_request") return "Update the Delegation plugin and TUI together, then refresh."
+  if (code === "timeout") return "Check the current connection and try Refresh again."
+  if (code === "coordinator_unavailable") return "Inspect the Delegation coordinator status and configuration."
+  if (code === "projection_invalid") return "Inspect the Delegation store and coordinator diagnostics."
+  return "Inspect the Delegation plugin diagnostics and try Refresh again."
+}
+
+function healthGuidance(reason: string | undefined) {
+  if (reason === "options_conflict" || reason === "invalid_options")
+    return "Review the active Delegation plugin configuration."
+  if (reason === "monitor_failed" || reason === "monitor_stopped")
+    return "Inspect the Delegation event monitor diagnostics."
+  if (reason === "startup_failed") return "Inspect the Delegation coordinator startup diagnostics."
+  return "Inspect the Delegation store diagnostics."
 }
 
 function routeValue(value: unknown): Route | undefined {

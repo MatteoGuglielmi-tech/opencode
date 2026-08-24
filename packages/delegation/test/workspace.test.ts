@@ -362,7 +362,7 @@ describe("Delegation supervision workspace", () => {
     const layers: KeymapLayer[] = []
     const context = {
       location: { directory: "/repo" },
-      renderer: { terminalWidth: 80 },
+      renderer: { terminalWidth: 80, on() {}, off() {} },
       storage: { memory: () => [memory, (update: (draft: typeof memory) => void) => update(memory)] },
       client: {
         plugin: {
@@ -386,7 +386,11 @@ describe("Delegation supervision workspace", () => {
         },
       },
       data: {
-        session: { get: () => undefined },
+        listen: () => () => {},
+        session: {
+          get: () => undefined,
+          permission: { sync: async () => {}, list: () => [] },
+        },
         location: { default: () => ({ directory: "/repo" }) },
       },
       theme: {
