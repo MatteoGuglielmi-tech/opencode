@@ -26,7 +26,9 @@ import { WebSearch } from "../websearch.js"
 import { PluginHooks } from "./hooks.js"
 
 const mutable = <T>(value: T) => value as DeepMutable<T>
-export const make = Effect.fn("PluginHost.make")(function* (plugin: import("../plugin.js").Interface) {
+export const make = Effect.fn("PluginHost.make")(function* (
+  plugin: Pick<import("../plugin.js").Interface, "list" | "query">,
+) {
   const app = yield* App.Metadata
   const agents = yield* Agent.Service
   const aisdk = yield* AISDK.Service
@@ -272,6 +274,18 @@ export const make = Effect.fn("PluginHost.make")(function* (plugin: import("../p
     },
     plugin: {
       list: () => response(plugin.list()),
+      query: {
+        invoke: (input) =>
+          response(
+            plugin.query({
+              pluginID: input.pluginID,
+              name: input.query,
+              version: input.version,
+              input: input.input,
+            }),
+          ),
+        register: () => Effect.die(new Error("Plugin query registration requires an active plugin")),
+      },
     },
     reference: {
       list: () => response(reference.list()),

@@ -1,7 +1,7 @@
 export * as PluginPromise from "./promise.js"
 
 import { define } from "@opencode-ai/plugin/effect/plugin"
-import type { Context, Plugin } from "@opencode-ai/plugin/promise/plugin"
+import type { Context, Plugin as PluginDefinition } from "@opencode-ai/plugin/promise/plugin"
 import type { CommandExecutionResult } from "@opencode-ai/plugin/promise/command"
 import type { Info } from "@opencode-ai/plugin/promise/tool"
 import { Agent } from "@opencode-ai/schema/agent"
@@ -9,6 +9,7 @@ import { Integration } from "@opencode-ai/schema/integration"
 import { Location } from "@opencode-ai/schema/location"
 import { Model } from "@opencode-ai/schema/model"
 import { Provider } from "@opencode-ai/schema/provider"
+import { Plugin } from "@opencode-ai/schema/plugin"
 import { AbsolutePath } from "@opencode-ai/schema/schema"
 import { Session } from "@opencode-ai/schema/session"
 import { SessionInbox } from "@opencode-ai/schema/session-inbox"
@@ -33,7 +34,7 @@ type JsonValue = null | boolean | number | string | Array<JsonValue> | { [key: s
  * preserves boot-time batching, so Promise-plugin transforms still coalesce
  * into one reload per domain.
  */
-export function fromPromise(plugin: Plugin) {
+export function fromPromise(plugin: PluginDefinition) {
   return define({
     id: plugin.id,
     effect: (host) =>
@@ -221,6 +222,17 @@ export function fromPromise(plugin: Plugin) {
           },
           plugin: {
             list: (input) => run(host.plugin.list(input)),
+            query: {
+              invoke: (input) => run(host.plugin.query.invoke({ ...input, pluginID: Plugin.ID.make(input.pluginID) })),
+              register: (name, definition) =>
+                register(
+                  host.plugin.query.register(name, {
+                    ...definition,
+                    execute: (input) =>
+                      attempt((signal) => definition.execute(input, { signal })).pipe(Effect.orDie),
+                  }),
+                ),
+            },
           },
           reference: {
             list: (input) => run(host.reference.list(input)),

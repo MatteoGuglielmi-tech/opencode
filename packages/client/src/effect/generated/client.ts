@@ -17,6 +17,8 @@ import type {
   Endpoint3_1Output,
   Endpoint4_0Input,
   Endpoint4_0Output,
+  Endpoint4_1Input,
+  Endpoint4_1Output,
   Endpoint5_0Input,
   Endpoint5_0Output,
   Endpoint5_1Input,
@@ -292,7 +294,19 @@ const Endpoint4_0 = (raw: RawClient["server.plugin"]) => (input?: Endpoint4_0Inp
     raw["plugin.list"]({ query: { location: input?.["location"] } }).pipe(Effect.mapError(mapClientError)),
   )
 
-const adaptGroup4 = (raw: RawClient["server.plugin"]) => ({ list: Endpoint4_0(raw) })
+const Endpoint4_1 = (raw: RawClient["server.plugin"]) => (input: Endpoint4_1Input) =>
+  preserveEffect<Endpoint4_1Output>()(
+    raw["plugin.query.invoke"]({
+      params: { pluginID: input["pluginID"], query: input["query"] },
+      query: { location: input["location"] },
+      payload: { version: input["version"], input: input["input"] },
+    }).pipe(Effect.mapError(mapClientError)),
+  )
+
+const adaptGroup4 = (raw: RawClient["server.plugin"]) => ({
+  list: Endpoint4_0(raw),
+  query: { invoke: Endpoint4_1(raw) },
+})
 
 const Endpoint5_0 = (raw: RawClient["server.session"]) => (input?: Endpoint5_0Input) =>
   preserveEffect<Endpoint5_0Output>()(

@@ -11,6 +11,8 @@ import type {
   AgentGetOutput,
   PluginListInput,
   PluginListOutput,
+  PluginQueryInvokeInput,
+  PluginQueryInvokeOutput,
   SessionListInput,
   SessionListOutput,
   SessionCreateInput,
@@ -446,6 +448,21 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ),
+      query: {
+        invoke: (input: PluginQueryInvokeInput, requestOptions?: RequestOptions) =>
+          request<PluginQueryInvokeOutput>(
+            {
+              method: "POST",
+              path: `/api/plugin/${encodeURIComponent(input.pluginID)}/query/${encodeURIComponent(input.query)}`,
+              query: { location: input["location"] },
+              body: { version: input["version"], input: input["input"] },
+              successStatus: 200,
+              declaredStatuses: [404, 400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ),
+      },
     },
     session: {
       list: (input?: SessionListInput, requestOptions?: RequestOptions) =>

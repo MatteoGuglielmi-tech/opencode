@@ -1,4 +1,3 @@
-import type { PluginApi } from "@opencode-ai/client/effect/api"
 import type { Effect, Scope } from "effect"
 import type { PluginOptions } from "../options.js"
 import type { App } from "../app.js"
@@ -14,6 +13,7 @@ import type { ShellDomain } from "./shell.js"
 import type { SkillDomain } from "./skill.js"
 import type { ToolDomain } from "./tool.js"
 import type { WebSearchDomain } from "./websearch.js"
+import type { Domain } from "./query.js"
 
 export interface Context {
   readonly app: App
@@ -24,7 +24,7 @@ export interface Context {
   readonly command: CommandDomain
   readonly event: EventDomain
   readonly integration: IntegrationDomain
-  readonly plugin: PluginApi<unknown>
+  readonly plugin: Domain<unknown>
   readonly reference: ReferenceDomain
   readonly session: SessionDomain
   readonly shell: ShellDomain

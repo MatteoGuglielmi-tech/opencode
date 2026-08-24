@@ -898,8 +898,8 @@ describe("SessionRunnerLLM", () => {
       )
       yield* Effect.addFinalizer(() => unsubscribe)
       const pluginHost = yield* PluginHost.make({
-        activate: () => Effect.void,
         list: () => Effect.succeed([]),
+        query: () => Effect.die(new Error("unused plugin.query")),
       }).pipe(
         Effect.provideService(
           PluginRuntime.Service,

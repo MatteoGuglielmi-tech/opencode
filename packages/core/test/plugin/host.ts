@@ -76,6 +76,10 @@ export function host(overrides: Overrides = {}): Plugin.Context {
     },
     plugin: overrides.plugin ?? {
       list: () => Effect.die("unused plugin.list"),
+      query: {
+        invoke: () => Effect.die("unused plugin.query.invoke"),
+        register: () => Effect.die("unused plugin.query.register"),
+      },
     },
     reference: overrides.reference ?? {
       list: () => Effect.die("unused reference.list"),

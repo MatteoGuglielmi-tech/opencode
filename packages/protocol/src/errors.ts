@@ -17,6 +17,40 @@ export class UnauthorizedError extends Schema.TaggedErrorClass<UnauthorizedError
   { httpApiStatus: 401 },
 ) {}
 
+export class PluginUnavailableError extends Schema.TaggedErrorClass<PluginUnavailableError>()(
+  "PluginUnavailableError",
+  {
+    kind: Schema.Literal("plugin_unavailable"),
+    pluginID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
+export class PluginQueryUnavailableError extends Schema.TaggedErrorClass<PluginQueryUnavailableError>()(
+  "PluginQueryUnavailableError",
+  {
+    kind: Schema.Literal("query_unavailable"),
+    pluginID: Schema.String,
+    query: Schema.String,
+    version: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
+export class PluginQueryInvalidRequestError extends Schema.TaggedErrorClass<PluginQueryInvalidRequestError>()(
+  "PluginQueryInvalidRequestError",
+  {
+    kind: Schema.Literal("invalid_request"),
+    pluginID: Schema.String,
+    query: Schema.String,
+    version: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 400 },
+) {}
+
 export class ConflictError extends Schema.TaggedErrorClass<ConflictError>()(
   "ConflictError",
   {

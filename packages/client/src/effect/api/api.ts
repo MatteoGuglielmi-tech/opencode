@@ -3,6 +3,7 @@ import type { Effect, Stream } from "effect"
 import type { Location } from "@opencode-ai/schema/location"
 import type { Agent } from "@opencode-ai/schema/agent"
 import type { Plugin } from "@opencode-ai/schema/plugin"
+import type { Schema } from "effect"
 import type { Workspace } from "@opencode-ai/schema/workspace"
 import type { Session } from "@opencode-ai/schema/session"
 import type { AbsolutePath } from "@opencode-ai/schema/schema"
@@ -17,7 +18,6 @@ import type { AgentAttachment } from "@opencode-ai/schema/prompt"
 import type { Skill } from "@opencode-ai/schema/skill"
 import type { Event } from "@opencode-ai/schema/event"
 import type { InstructionEntry } from "@opencode-ai/schema/instruction-entry"
-import type { Schema } from "effect"
 import type { EventLog } from "@opencode-ai/schema/event-log"
 import type { Shell } from "@opencode-ai/schema/shell"
 import type { DateTime } from "effect"
@@ -93,8 +93,19 @@ export type Endpoint4_0Input = {
 export type Endpoint4_0Output = { readonly location: Location.Info; readonly data: ReadonlyArray<Plugin.Info> }
 export type PluginListOperation<E = never> = (input?: Endpoint4_0Input) => Effect.Effect<Endpoint4_0Output, E>
 
+export type Endpoint4_1Input = {
+  readonly pluginID: Plugin.ID
+  readonly query: string
+  readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined
+  readonly version: string
+  readonly input: Schema.Json
+}
+export type Endpoint4_1Output = { readonly location: Location.Info; readonly data: Plugin.QueryResponse }
+export type PluginQueryInvokeOperation<E = never> = (input: Endpoint4_1Input) => Effect.Effect<Endpoint4_1Output, E>
+
 export interface PluginApi<E = never> {
   readonly list: PluginListOperation<E>
+  readonly query: { readonly invoke: PluginQueryInvokeOperation<E> }
 }
 
 export type Endpoint5_0Input = {

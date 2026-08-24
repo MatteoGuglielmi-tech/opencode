@@ -14,6 +14,8 @@ export type PermissionEffect = "allow" | "deny" | "ask"
 
 export type PluginInfo = { id: string }
 
+export type PluginQueryResponse = { version: string; output: JsonValue }
+
 export type SessionForkBoundary = { type: "before"; messageID: string } | { type: "through"; messageID: string }
 
 export type MoneyUSD = number
@@ -2157,6 +2159,37 @@ export type AgentNotFoundError = {
 export const isAgentNotFoundError = (value: unknown): value is AgentNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "AgentNotFoundError"
 
+export type PluginUnavailableError = {
+  readonly _tag: "PluginUnavailableError"
+  readonly kind: "plugin_unavailable"
+  readonly pluginID: string
+  readonly message: string
+}
+export const isPluginUnavailableError = (value: unknown): value is PluginUnavailableError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "PluginUnavailableError"
+
+export type PluginQueryUnavailableError = {
+  readonly _tag: "PluginQueryUnavailableError"
+  readonly kind: "query_unavailable"
+  readonly pluginID: string
+  readonly query: string
+  readonly version: string
+  readonly message: string
+}
+export const isPluginQueryUnavailableError = (value: unknown): value is PluginQueryUnavailableError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "PluginQueryUnavailableError"
+
+export type PluginQueryInvalidRequestError = {
+  readonly _tag: "PluginQueryInvalidRequestError"
+  readonly kind: "invalid_request"
+  readonly pluginID: string
+  readonly query: string
+  readonly version: string
+  readonly message: string
+}
+export const isPluginQueryInvalidRequestError = (value: unknown): value is PluginQueryInvalidRequestError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "PluginQueryInvalidRequestError"
+
 export type InvalidCursorError = { readonly _tag: "InvalidCursorError"; readonly message: string }
 export const isInvalidCursorError = (value: unknown): value is InvalidCursorError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "InvalidCursorError"
@@ -2365,6 +2398,21 @@ export type PluginListInput = {
 export type PluginListOutput = {
   location: { directory: string; workspaceID?: string; project: { id: string; directory: string; canonical: string } }
   data: Array<PluginInfo>
+}
+
+export type PluginQueryInvokeInput = {
+  readonly pluginID: { readonly pluginID: string; readonly query: string }["pluginID"]
+  readonly query: { readonly pluginID: string; readonly query: string }["query"]
+  readonly location?: {
+    readonly location?: { readonly directory?: string | undefined; readonly workspace?: string | undefined } | undefined
+  }["location"]
+  readonly version: { readonly version: string; readonly input: JsonValue }["version"]
+  readonly input: { readonly version: string; readonly input: JsonValue }["input"]
+}
+
+export type PluginQueryInvokeOutput = {
+  location: { directory: string; workspaceID?: string; project: { id: string; directory: string; canonical: string } }
+  data: PluginQueryResponse
 }
 
 export type SessionListInput = {
