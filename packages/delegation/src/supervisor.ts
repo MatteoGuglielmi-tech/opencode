@@ -72,6 +72,7 @@ export class DefinitePromptError extends Error {}
 
 export class Supervisor {
   readonly #permissions = new Map<string, Set<string>>()
+  readonly #resolvedPermissions = new Map<string, Set<string>>()
   readonly #children = new Set<string>()
   readonly #starts = new Set<Promise<void>>()
   readonly #operations = new Map<string, Promise<unknown>>()
@@ -241,22 +242,23 @@ export class Supervisor {
       return
     }
     if (event.type === "permission.asked") {
+      if (this.#resolvedPermissions.get(operation.id)?.has(event.requestID)) return
       const permissions = this.#permissions.get(operation.id) ?? new Set<string>()
+      const startsPermissionWait = permissions.size === 0
       permissions.add(event.requestID)
       this.#permissions.set(operation.id, permissions)
-      await this.store.transition(operation.id, ["starting", "running", "waiting"], "waiting")
+      if (startsPermissionWait) await this.store.startPermissionWait(operation.id, this.now())
       return
     }
     if (event.type === "permission.replied") {
+      const resolved = this.#resolvedPermissions.get(operation.id) ?? new Set<string>()
+      resolved.add(event.requestID)
+      this.#resolvedPermissions.set(operation.id, resolved)
       const permissions = this.#permissions.get(operation.id)
       if (!permissions?.delete(event.requestID)) return
       if (permissions.size > 0) return
       this.#permissions.delete(operation.id)
-      await this.store.transition(
-        operation.id,
-        ["waiting"],
-        operation.executionStartedAt === undefined ? "starting" : "running",
-      )
+      await this.store.endPermissionWait(operation.id, this.now(), "replied")
       return
     }
     if (event.type === "session.execution.started") {
@@ -270,8 +272,12 @@ export class Supervisor {
     const outcome = terminalEvent(event)
     if (!outcome) return
     if (outcome.state === "completed" && operation.childID) {
+      const executionEndedAt = this.now()
       await this.store.transition(operation.id, ["starting", "running", "waiting"], operation.state, {
-        completionObservedAt: this.now(),
+        completionObservedAt: executionEndedAt,
+        ...(operation.executionStartedAt === undefined
+          ? {}
+          : { executionEndedAt, executionEndSource: "session_event" as const }),
       })
       if (!(await this.#complete(operation.id, operation.childID))) return
       await this.retryDeliveries()
@@ -279,10 +285,16 @@ export class Supervisor {
       return
     }
     this.#permissions.delete(operation.id)
+    this.#resolvedPermissions.delete(operation.id)
     this.#children.delete(event.sessionID)
+    const terminalAt = this.now()
     await this.store.transition(operation.id, ["starting", "running", "waiting"], outcome.state, {
-      terminalAt: this.now(),
+      terminalAt,
+      ...(operation.executionStartedAt === undefined
+        ? {}
+        : { executionEndedAt: terminalAt, executionEndSource: "session_event" as const }),
       reason: outcome.reason,
+      reasonCode: outcome.reasonCode,
     })
     await this.retryDeliveries()
     await this.drain()
@@ -346,6 +358,7 @@ export class Supervisor {
       const changed = await this.store.transition(operation.id, ["starting"], "interrupted", {
         terminalAt: this.now(),
         reason: "cancelled before start",
+        reasonCode: "cancelled_before_start",
       })
       if (changed) this.#children.delete(childID)
       await this.drain()
@@ -483,10 +496,12 @@ export class Supervisor {
     if (output === undefined) return false
     const changed = await this.store.transition(operation.id, ["starting", "running", "waiting"], "completed", {
       terminalAt: this.now(),
+      reasonCode: "completed",
       outcome: output,
     })
     if (!changed) return false
     this.#permissions.delete(operation.id)
+    this.#resolvedPermissions.delete(operation.id)
     this.#children.delete(childID)
     return true
   }
@@ -519,6 +534,7 @@ export class Supervisor {
         const changed = await this.store.transition(operation.id, ["starting"], "interrupted", {
           terminalAt: this.now(),
           reason: "cancelled before start",
+          reasonCode: "cancelled_before_start",
         })
         if (changed) this.#children.delete(childID)
         return undefined
@@ -543,6 +559,7 @@ export class Supervisor {
               const changed = await this.store.transition(operation.id, ["starting"], "failed", {
                 terminalAt: this.now(),
                 reason: cause.message,
+                reasonCode: "setup_failed",
               })
               if (changed) this.#children.delete(childID)
               return false
@@ -553,6 +570,7 @@ export class Supervisor {
             const changed = await this.store.transition(operation.id, ["starting"], "interrupted", {
               terminalAt: this.now(),
               reason: "prompt admission acknowledgement uncertain",
+              reasonCode: "prompt_admission_uncertain",
             })
             if (changed) this.#children.delete(childID)
             return false
@@ -572,6 +590,7 @@ export class Supervisor {
       const changed = await this.store.transition(operation.id, ["starting"], "failed", {
         terminalAt: this.now(),
         reason: cause instanceof Error ? cause.message : String(cause),
+        reasonCode: "setup_failed",
       })
       if (changed && childID) this.#children.delete(childID)
       return undefined
@@ -613,9 +632,14 @@ function terminal(state: OperationState) {
 function terminalEvent(event: SupervisorEvent) {
   if (event.type === "session.execution.succeeded") return { state: "completed" as const }
   if (event.type === "session.execution.failed")
-    return { state: "failed" as const, reason: event.reason ?? "child failed" }
+    return { state: "failed" as const, reason: event.reason ?? "child failed", reasonCode: "execution_failed" as const }
   if (event.type === "session.execution.interrupted")
-    return { state: "interrupted" as const, reason: event.reason ?? "child interrupted" }
-  if (event.type === "session.deleted") return { state: "interrupted" as const, reason: "child session deleted" }
+    return {
+      state: "interrupted" as const,
+      reason: event.reason ?? "child interrupted",
+      reasonCode: "user_interrupted" as const,
+    }
+  if (event.type === "session.deleted")
+    return { state: "interrupted" as const, reason: "child session deleted", reasonCode: "child_deleted" as const }
   return undefined
 }

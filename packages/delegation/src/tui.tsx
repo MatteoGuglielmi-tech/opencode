@@ -2,7 +2,12 @@
 import { Plugin } from "@opencode-ai/plugin/tui"
 import type { Context, Destination, Route } from "@opencode-ai/plugin/tui/context"
 import { createMemo, createResource, For, Match, Show, Switch } from "solid-js"
-import { initialFailure, loadSupervision, supervisionView } from "./supervision.js"
+import {
+  initialFailure,
+  loadSupervision,
+  type ProjectedOperation,
+  supervisionView,
+} from "./supervision.js"
 
 const PAGE = "supervision"
 const ID = "opencode.delegation"
@@ -59,6 +64,19 @@ function SupervisionPage(props: { readonly context: Context }) {
     const current = workspace()
     if (current?.type === "workspace") return current.focus?.parentID
   })
+  const selectedOperation = createMemo(() => {
+    const current = workspace()
+    if (current?.type !== "workspace") return undefined
+    const parent = current.parents.find((candidate) => candidate.session.id === current.focus?.parentID)
+    return (
+      parent?.operations.find((operation) => operation.id === current.focus?.operationID) ?? parent?.operations[0]
+    )
+  })
+  const observedAt = createMemo(() => {
+    const current = workspace()
+    return current?.type === "workspace" ? current.observedAt : 0
+  })
+  const selectedOperationID = createMemo(() => selectedOperation()?.id)
   const health = createMemo(() => {
     const current = workspace()
     if (current?.type === "workspace" && current.health.status === "degraded") return current.health
@@ -109,22 +127,96 @@ function SupervisionPage(props: { readonly context: Context }) {
         <Match when={ready()}>
           <For each={ready()?.parents ?? []}>
             {(parent) => (
-              <box flexDirection="row" gap={2}>
-                <text fg={theme.text.subdued}>{selectedParent() === parent.session.id ? ">" : " "}</text>
-                <text fg={theme.text.default}>{parent.session.title ?? parent.session.id}</text>
-                <text fg={theme.text.subdued}>
-                  {parent.counts.actionable} actionable / {parent.counts.total} retained
-                </text>
-                <Show when={parent.session.archived}>
-                  <text fg={theme.text.subdued}>archived</text>
-                </Show>
+              <box flexDirection="column">
+                <box flexDirection="row" gap={2}>
+                  <text fg={theme.text.subdued}>{selectedParent() === parent.session.id ? ">" : " "}</text>
+                  <text fg={theme.text.default}>{parent.session.title ?? parent.session.id}</text>
+                  <text fg={theme.text.subdued}>
+                    {parent.counts.actionable} actionable / {parent.counts.total} retained
+                  </text>
+                  <Show when={parent.session.archived}>
+                    <text fg={theme.text.subdued}>archived</text>
+                  </Show>
+                </box>
+                <For each={parent.operations}>
+                  {(operation) => (
+                    <text fg={theme.text.subdued}>
+                      {selectedOperationID() === operation.id ? "  > " : "    "}
+                      {operation.text} [{operation.presentationState}] {timelineTrack(operation, observedAt())}
+                    </text>
+                  )}
+                </For>
               </box>
             )}
           </For>
+          <Show when={selectedOperation()}>
+            {(operation: () => ProjectedOperation) => (
+              <box flexDirection="column" marginTop={1}>
+                <text fg={theme.text.default}>Operation inspector</text>
+                <For each={operationInspector(operation(), observedAt())}>
+                  {(line) => <text fg={theme.text.subdued}>{line}</text>}
+                </For>
+              </box>
+            )}
+          </Show>
         </Match>
       </Switch>
     </box>
   )
+}
+
+export function timelineTrack(operation: ProjectedOperation, observedAt: number) {
+  const timeline = operation.timeline
+  const end = timeline.concludedAt ?? observedAt
+  const phases = [
+    duration("Queue", timeline.admittedAt, timeline.permitClaimedAt ?? end),
+    timeline.permitClaimedAt === undefined
+      ? undefined
+      : duration("Starting", timeline.permitClaimedAt, timeline.executionStartedAt ?? end),
+    timeline.executionStartedAt === undefined
+      ? undefined
+      : duration(
+          timeline.executionEndSource === "startup_reconciliation"
+            ? "Executing (uncertain end: startup reconciliation)"
+            : "Executing",
+          timeline.executionStartedAt,
+          timeline.executionEndedAt ?? end,
+        ),
+    timeline.executionEndedAt === undefined
+      ? undefined
+      : duration("Finalizing", timeline.executionEndedAt, timeline.concludedAt ?? observedAt),
+    operation.presentationState === "terminal" ? "Terminal" : undefined,
+  ].filter((value): value is string => value !== undefined)
+  const overlays = timeline.permissionWaits.map((wait) => duration("Waiting", wait.startedAt, wait.endedAt ?? observedAt))
+  return `${phases.join(" | ")}${overlays.length === 0 ? "" : ` || overlays: ${overlays.join(", ")}`}`
+}
+
+export function operationInspector(operation: ProjectedOperation, observedAt: number) {
+  return [
+    `Operation ${operation.id} (batch ${operation.batchID}, index ${operation.index})`,
+    `Parent ${operation.parentID}${operation.childID ? ` | Child ${operation.childID}` : ""}`,
+    `Agent ${operation.agent} | Model ${operation.model.providerID}/${operation.model.modelID}${operation.model.variant ? ` (${operation.model.variant})` : ""}`,
+    `State ${operation.presentationState} | Observed ${observedAt}`,
+    timelineTrack(operation, observedAt),
+    ...(operation.timeline.executionEndSource
+      ? [
+          `Execution end: ${operation.timeline.executionEndSource === "startup_reconciliation" ? "uncertain startup reconciliation boundary" : "Session event"}`,
+        ]
+      : []),
+    ...(operation.outcome
+      ? [`Outcome ${operation.outcome.state}: ${operation.outcome.reason.code}${operation.outcome.reason.detail ? ` - ${operation.outcome.reason.detail}` : ""}`]
+      : []),
+    ...(operation.recovery
+      ? [
+          `Recovery ${operation.recovery.episodeID} at ${operation.recovery.reconciledAt}: previous ${operation.recovery.previousState}, ${operation.recovery.eligible ? "eligible" : "resolved"}`,
+        ]
+      : []),
+    ...(operation.retryOfOperationID ? [`Retry of ${operation.retryOfOperationID}`] : []),
+  ]
+}
+
+function duration(label: string, start: number, end: number) {
+  return `${label} ${Math.max(0, end - start)}ms`
 }
 
 function routeValue(value: unknown): Route | undefined {

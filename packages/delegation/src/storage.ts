@@ -9,10 +9,21 @@ import { AgentAttachment, PromptInput } from "@opencode-ai/schema"
 import type { Options } from "./config.js"
 
 const PROFILE_VERSION = 1
-const SCHEMA_VERSION = 7
+const SCHEMA_VERSION = 8
 const OWNER_INITIALIZATION_GRACE = 5_000
 
 export type OperationState = "queued" | "starting" | "running" | "waiting" | "completed" | "failed" | "interrupted"
+export type ExecutionEndSource = "session_event" | "startup_reconciliation"
+export type PermissionWaitCloseReason = "replied" | "operation_concluded" | "service_restart"
+export type TerminalReasonCode =
+  | "completed"
+  | "execution_failed"
+  | "setup_failed"
+  | "cancelled_before_start"
+  | "user_interrupted"
+  | "child_deleted"
+  | "prompt_admission_uncertain"
+  | "service_restarted"
 
 export interface OperationRecord {
   readonly id: string
@@ -32,12 +43,17 @@ export interface OperationRecord {
   readonly promptAdmitted: boolean
   readonly cancellationRequested: boolean
   readonly executionStartedAt?: number
+  readonly executionEndedAt?: number
+  readonly executionEndSource?: ExecutionEndSource
   readonly completionObservedAt?: number
   readonly admittedAt: number
   readonly permitClaimedAt?: number
   readonly terminalAt?: number
   readonly reason?: string
+  readonly reasonCode?: TerminalReasonCode
   readonly recoveryEligible: boolean
+  readonly recoveryID?: string
+  readonly recoveryReconciledAt?: number
   readonly recoveryPreviousState?: "starting" | "running" | "waiting"
   readonly retryOfOperationID?: string
 }
@@ -47,9 +63,12 @@ export interface TransitionPatch {
   readonly promptID?: string
   readonly promptAdmitted?: boolean
   readonly executionStartedAt?: number
+  readonly executionEndedAt?: number
+  readonly executionEndSource?: ExecutionEndSource
   readonly completionObservedAt?: number
   readonly terminalAt?: number
   readonly reason?: string
+  readonly reasonCode?: TerminalReasonCode
   readonly outcome?: string
 }
 
@@ -85,6 +104,8 @@ export interface DelegationSnapshot {
     readonly id: string
     readonly sequence: number
     readonly admittedAt: number
+    readonly startedAt?: number
+    readonly concludedAt?: number
     readonly receiptDelivery: DeliveryState
     readonly status: "active" | "concluded"
     readonly outcomes: {
@@ -95,6 +116,7 @@ export interface DelegationSnapshot {
   }>
   readonly operations: ReadonlyArray<
     OperationRecord & {
+      readonly permissionWaits: ReadonlyArray<PermissionWait>
       readonly fifoPosition: number
       readonly terminalDelivery?: DeliveryState
       readonly recoveryDelivery?: DeliveryState
@@ -111,13 +133,21 @@ export interface DelegationSnapshot {
 export interface WorkspaceSnapshot {
   readonly parents: ReadonlyArray<{
     readonly parentID: string
-    readonly operations: ReadonlyArray<OperationRecord>
+    readonly operations: ReadonlyArray<OperationRecord & { readonly permissionWaits: ReadonlyArray<PermissionWait> }>
+    readonly receiptDelivery: Readonly<Record<string, DeliveryState>>
     readonly delivery: DelegationSnapshot["delivery"]
   }>
 }
 
 export type DeliveryKind = "admission" | "terminal" | "recovery" | "control"
 export type DeliveryState = "acknowledged" | "pending" | "conflicted"
+
+export interface PermissionWait {
+  readonly sequence: number
+  readonly startedAt: number
+  readonly endedAt?: number
+  readonly closeReason?: PermissionWaitCloseReason
+}
 
 export type ControlAction =
   | Readonly<{ action: "cancel"; batchID?: string; operationID?: string }>
@@ -262,6 +292,12 @@ export interface Store {
   readonly startupState: () => Promise<StartupState>
   readonly reconcileStartup: (reconciledAt: number) => Promise<void>
   readonly claimQueued: (limit: number, claimedAt: number) => Promise<ReadonlyArray<OperationRecord>>
+  readonly startPermissionWait: (operationID: string, startedAt: number) => Promise<boolean>
+  readonly endPermissionWait: (
+    operationID: string,
+    endedAt: number,
+    reason: PermissionWaitCloseReason,
+  ) => Promise<boolean>
   readonly transition: (
     operationID: string,
     expected: ReadonlyArray<OperationState>,
@@ -450,7 +486,9 @@ export async function open(options: Options): Promise<Store> {
       )
       .all(limit)
     const claim = database.query<never, [number, string]>(
-      "UPDATE delegation_operation SET state = 'starting', permit_claimed_at = ? WHERE id = ? AND state = 'queued'",
+      `UPDATE delegation_operation
+       SET state = 'starting', permit_claimed_at = MAX(?, (SELECT admitted_at FROM delegation_batch WHERE id = batch_id))
+       WHERE id = ? AND state = 'queued'`,
     )
     return candidates.flatMap((candidate) => {
       if (claim.run(claimedAt, candidate.id).changes !== 1) return []
@@ -471,6 +509,7 @@ export async function open(options: Options): Promise<Store> {
       transitionOperation(database, operationID, ["queued"], "interrupted", {
         terminalAt: cancelledAt,
         reason: "cancelled before start",
+        reasonCode: "cancelled_before_start",
       })
     } else {
       database
@@ -481,6 +520,41 @@ export async function open(options: Options): Promise<Store> {
     }
     return { operation: loadOperation(database, "o.id", operationID), requested: true }
   })
+  const startPermissionWait = database.transaction((operationID: string, startedAt: number) => {
+    const operation = loadOperation(database, "o.id", operationID)
+    if (!operation || terminal(operation.state)) return false
+    const open = database
+      .query<{ sequence: number }, [string]>(
+        "SELECT sequence FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL",
+      )
+      .get(operationID)
+    if (open) return false
+    const sequence =
+      database
+        .query<
+          { sequence: number },
+          [string]
+        >("SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM delegation_permission_wait WHERE operation_id = ?")
+        .get(operationID)?.sequence ?? 1
+    database
+      .query("INSERT INTO delegation_permission_wait (operation_id, sequence, started_at) VALUES (?, ?, ?)")
+      .run(operationID, sequence, normalizeTime(startedAt, operation.executionStartedAt, operation.permitClaimedAt, operation.admittedAt))
+    database
+      .query("UPDATE delegation_operation SET state = 'waiting' WHERE id = ? AND state IN ('starting', 'running', 'waiting')")
+      .run(operationID)
+    return true
+  })
+  const endPermissionWait = database.transaction(
+    (operationID: string, endedAt: number, reason: PermissionWaitCloseReason) => {
+      const operation = loadOperation(database, "o.id", operationID)
+      if (!operation || terminal(operation.state)) return false
+      if (!closePermissionWait(database, operationID, endedAt, reason)) return false
+      database
+        .query("UPDATE delegation_operation SET state = ? WHERE id = ? AND state = 'waiting'")
+        .run(operation.executionStartedAt === undefined ? "starting" : "running", operationID)
+      return true
+    },
+  )
   const removeParent = database.transaction((parentID: string) => {
     const batches = database
       .query<{ id: string }, [string]>("SELECT id FROM delegation_batch WHERE parent_id = ?")
@@ -714,6 +788,16 @@ export async function open(options: Options): Promise<Store> {
       await owner.check()
       return claimQueued(limit, claimedAt)
     },
+    async startPermissionWait(operationID, startedAt) {
+      if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
+      await owner.check()
+      return startPermissionWait(operationID, startedAt)
+    },
+    async endPermissionWait(operationID, endedAt, reason) {
+      if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
+      await owner.check()
+      return endPermissionWait(operationID, endedAt, reason)
+    },
     async transition(operationID, expected, state, patch = {}) {
       if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
       await owner.check()
@@ -764,7 +848,23 @@ export async function open(options: Options): Promise<Store> {
           .all()
           .map((row) => ({
             parentID: row.parent_id,
-            operations: loadParentOperations(database, row.parent_id),
+            operations: loadParentOperations(database, row.parent_id).map((operation) => ({
+              ...operation,
+              permissionWaits: loadPermissionWaits(database, operation.id),
+            })),
+            receiptDelivery: Object.fromEntries(
+              database
+                .query<{ batch_id: string; acknowledged: number; conflicted: number }, [string]>(
+                  `SELECT receipt.batch_id, receipt.acknowledged, receipt.conflicted
+                   FROM delegation_receipt receipt JOIN delegation_batch batch ON batch.id = receipt.batch_id
+                   WHERE batch.parent_id = ?`,
+                )
+                .all(row.parent_id)
+                .map((receipt) => [
+                  receipt.batch_id,
+                  deliveryState(receipt.acknowledged, receipt.conflicted),
+                ]),
+            ),
             delivery: deliverySummary(database, row.parent_id),
           })),
       }))()
@@ -802,9 +902,11 @@ export async function open(options: Options): Promise<Store> {
                        OVER (PARTITION BY b.id) AS batch_completed_count,
                      SUM(CASE WHEN o.state = 'failed' THEN 1 ELSE 0 END)
                        OVER (PARTITION BY b.id) AS batch_failed_count,
-                     SUM(CASE WHEN o.state = 'interrupted' THEN 1 ELSE 0 END)
-                       OVER (PARTITION BY b.id) AS batch_interrupted_count,
-                     ROW_NUMBER() OVER (ORDER BY b.admission_sequence, o.operation_index) AS fifo_position
+                      SUM(CASE WHEN o.state = 'interrupted' THEN 1 ELSE 0 END)
+                        OVER (PARTITION BY b.id) AS batch_interrupted_count,
+                      MIN(o.permit_claimed_at) OVER (PARTITION BY b.id) AS batch_started_at,
+                      MAX(o.terminal_at) OVER (PARTITION BY b.id) AS batch_concluded_at,
+                      ROW_NUMBER() OVER (ORDER BY b.admission_sequence, o.operation_index) AS fifo_position
              FROM delegation_operation o
              JOIN delegation_batch b ON b.id = o.batch_id
              JOIN delegation_receipt r ON r.batch_id = b.id
@@ -829,6 +931,10 @@ export async function open(options: Options): Promise<Store> {
           id: row.batch_id,
           sequence: row.admission_sequence,
           admittedAt: row.admitted_at,
+          ...(row.batch_started_at === null ? {} : { startedAt: row.batch_started_at }),
+          ...(row.batch_terminal_count !== row.batch_operation_count || row.batch_concluded_at === null
+            ? {}
+            : { concludedAt: row.batch_concluded_at }),
           receiptDelivery: deliveryState(row.receipt_acknowledged, row.receipt_conflicted),
           status: row.batch_terminal_count === row.batch_operation_count ? "concluded" : "active",
           outcomes: {
@@ -844,6 +950,7 @@ export async function open(options: Options): Promise<Store> {
         batches: [...batches.values()],
         operations: page.map((row) => ({
           ...operationRecord(row),
+          permissionWaits: loadPermissionWaits(database, row.id),
           fifoPosition: row.fifo_position,
           ...(row.terminal_acknowledged === null
             ? {}
@@ -905,6 +1012,8 @@ function safeStore(store: Store): Store {
     startupState: safeMethod(store.startupState),
     reconcileStartup: safeMethod(store.reconcileStartup),
     claimQueued: safeMethod(store.claimQueued),
+    startPermissionWait: safeMethod(store.startPermissionWait),
+    endPermissionWait: safeMethod(store.endPermissionWait),
     transition: safeMethod(store.transition),
     operation: safeMethod(store.operation),
     operationByChild: safeMethod(store.operationByChild),
@@ -961,6 +1070,7 @@ function commitControlRecord(database: Database, request: ControlRequest): Contr
         transitionOperation(database, operation.id, ["queued"], "interrupted", {
           terminalAt: request.committedAt,
           reason: "cancelled before start",
+          reasonCode: "cancelled_before_start",
         })
     })
     insertControl(database, request, { effect: { kind: "cancel", operationIDs: operations.map((item) => item.id) } })
@@ -991,9 +1101,7 @@ function commitControlRecord(database: Database, request: ControlRequest): Contr
     const operation = ownedOperation(database, request.parentID, request.action.operationID)
     if (!operation.recoveryEligible)
       throw new StorageError("control_invalid", "Delegation operation is not eligible for dismissal")
-    database
-      .query("UPDATE delegation_operation SET recovery_id = NULL, recovery_previous_state = NULL WHERE id = ?")
-      .run(operation.id)
+    database.query("UPDATE delegation_operation SET recovery_eligible = 0 WHERE id = ?").run(operation.id)
     insertControl(database, request, {})
     return loadControl(database, request.parentID, request.invocationID, true)
   }
@@ -1060,9 +1168,7 @@ function commitControlRecord(database: Database, request: ControlRequest): Contr
       "Delegation admitted",
       JSON.stringify(receiptMetadata(retryRequest, retryBatchID, retryOperations)),
     )
-  database
-    .query("UPDATE delegation_operation SET recovery_id = NULL, recovery_previous_state = NULL WHERE id = ?")
-    .run(original.id)
+  database.query("UPDATE delegation_operation SET recovery_eligible = 0 WHERE id = ?").run(original.id)
   insertControl(database, request, { retryBatchID })
   return loadControl(database, request.parentID, request.invocationID, true)
 }
@@ -1261,6 +1367,71 @@ function verifySchema(database: Database) {
 function migrateSchema(database: Database) {
   const version = database.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version
   if (version === SCHEMA_VERSION) return
+  if (version === 7) {
+    database.transaction(() => {
+      const columns = new Set(
+        database
+          .query<{ name: string }, []>("PRAGMA table_info(delegation_operation)")
+          .all()
+          .map((column) => column.name),
+      )
+      const additions = {
+        execution_ended_at: "INTEGER",
+        execution_end_source: "TEXT CHECK (execution_end_source IN ('session_event', 'startup_reconciliation'))",
+        terminal_reason_code:
+          "TEXT CHECK (terminal_reason_code IN ('completed', 'execution_failed', 'setup_failed', 'cancelled_before_start', 'user_interrupted', 'child_deleted', 'prompt_admission_uncertain', 'service_restarted'))",
+        recovery_reconciled_at: "INTEGER",
+        recovery_eligible: "INTEGER NOT NULL DEFAULT 0 CHECK (recovery_eligible IN (0, 1))",
+      }
+      Object.entries(additions)
+        .filter(([column]) => !columns.has(column))
+        .forEach(([column, definition]) =>
+          database.exec(`ALTER TABLE delegation_operation ADD COLUMN ${column} ${definition}`),
+        )
+      database.exec(`
+        UPDATE delegation_operation
+        SET execution_ended_at = CASE
+              WHEN execution_started_at IS NULL THEN NULL
+              WHEN terminal_reason = 'service restarted' THEN terminal_at
+              ELSE COALESCE(completion_observed_at, terminal_at)
+            END,
+            execution_end_source = CASE
+              WHEN execution_started_at IS NULL THEN NULL
+              WHEN terminal_reason = 'service restarted' THEN 'startup_reconciliation'
+              WHEN COALESCE(completion_observed_at, terminal_at) IS NOT NULL THEN 'session_event'
+              ELSE NULL
+            END,
+            terminal_reason_code = CASE
+              WHEN state = 'completed' THEN 'completed'
+              WHEN terminal_reason = 'service restarted' THEN 'service_restarted'
+              WHEN terminal_reason = 'cancelled before start' THEN 'cancelled_before_start'
+              WHEN terminal_reason = 'prompt admission acknowledgement uncertain' THEN 'prompt_admission_uncertain'
+              WHEN terminal_reason = 'child session deleted' THEN 'child_deleted'
+              WHEN state = 'failed' AND execution_started_at IS NULL THEN 'setup_failed'
+              WHEN state = 'failed' THEN 'execution_failed'
+              ELSE 'user_interrupted'
+            END,
+            recovery_reconciled_at = CASE WHEN recovery_id IS NULL THEN NULL ELSE terminal_at END,
+            recovery_eligible = CASE WHEN recovery_id IS NULL THEN 0 ELSE 1 END
+        WHERE state IN ('completed', 'failed', 'interrupted');
+        DROP TABLE IF EXISTS delegation_permission_wait;
+        CREATE TABLE delegation_permission_wait (
+          operation_id TEXT NOT NULL REFERENCES delegation_operation(id) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          started_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          close_reason TEXT CHECK (close_reason IN ('replied', 'operation_concluded', 'service_restart')),
+          PRIMARY KEY(operation_id, sequence),
+          CHECK ((ended_at IS NULL AND close_reason IS NULL) OR (ended_at IS NOT NULL AND close_reason IS NOT NULL))
+        );
+        CREATE UNIQUE INDEX delegation_permission_wait_open
+          ON delegation_permission_wait(operation_id) WHERE ended_at IS NULL;
+        UPDATE delegation_meta SET value = '${SCHEMA_VERSION}' WHERE key = 'schema';
+        PRAGMA user_version = ${SCHEMA_VERSION};
+      `)
+    })()
+    return
+  }
   if (version === 6) {
     database.transaction(() => {
       const tables = [
@@ -1283,11 +1454,11 @@ function migrateSchema(database: Database) {
           ),
         )
       database.exec(`
-        UPDATE delegation_meta SET value = '${SCHEMA_VERSION}' WHERE key = 'schema';
-        PRAGMA user_version = ${SCHEMA_VERSION};
+        UPDATE delegation_meta SET value = '7' WHERE key = 'schema';
+        PRAGMA user_version = 7;
       `)
     })()
-    return
+    return migrateSchema(database)
   }
   if (version === 5) {
     database.exec(`
@@ -1408,10 +1579,15 @@ type OperationRow = {
   admitted_at: number
   permit_claimed_at: number | null
   execution_started_at: number | null
+  execution_ended_at: number | null
+  execution_end_source: ExecutionEndSource | null
   completion_observed_at: number | null
   terminal_at: number | null
   terminal_reason: string | null
+  terminal_reason_code: TerminalReasonCode | null
   recovery_id: string | null
+  recovery_reconciled_at: number | null
+  recovery_eligible: number
   recovery_previous_state: "starting" | "running" | "waiting" | null
   retry_of_operation_id: string | null
 }
@@ -1424,6 +1600,8 @@ type SnapshotRow = OperationRow & {
   batch_completed_count: number
   batch_failed_count: number
   batch_interrupted_count: number
+  batch_started_at: number | null
+  batch_concluded_at: number | null
   receipt_acknowledged: number
   receipt_conflicted: number
   terminal_acknowledged: number | null
@@ -1471,10 +1649,15 @@ function operationRecord(row: OperationRow): OperationRecord {
     admittedAt: row.admitted_at,
     ...(row.permit_claimed_at === null ? {} : { permitClaimedAt: row.permit_claimed_at }),
     ...(row.execution_started_at === null ? {} : { executionStartedAt: row.execution_started_at }),
+    ...(row.execution_ended_at === null ? {} : { executionEndedAt: row.execution_ended_at }),
+    ...(row.execution_end_source === null ? {} : { executionEndSource: row.execution_end_source }),
     ...(row.completion_observed_at === null ? {} : { completionObservedAt: row.completion_observed_at }),
     ...(row.terminal_at === null ? {} : { terminalAt: row.terminal_at }),
     ...(row.terminal_reason === null ? {} : { reason: row.terminal_reason }),
-    recoveryEligible: row.recovery_id !== null,
+    ...(row.terminal_reason_code === null ? {} : { reasonCode: row.terminal_reason_code }),
+    recoveryEligible: row.recovery_eligible === 1,
+    ...(row.recovery_id === null ? {} : { recoveryID: row.recovery_id }),
+    ...(row.recovery_reconciled_at === null ? {} : { recoveryReconciledAt: row.recovery_reconciled_at }),
     ...(row.recovery_previous_state === null ? {} : { recoveryPreviousState: row.recovery_previous_state }),
     ...(row.retry_of_operation_id === null ? {} : { retryOfOperationID: row.retry_of_operation_id }),
   }
@@ -1561,6 +1744,58 @@ function loadParentOperations(database: Database, parentID: string) {
     .map(operationRecord)
 }
 
+function loadPermissionWaits(database: Database, operationID: string): ReadonlyArray<PermissionWait> {
+  return database
+    .query<
+      { sequence: number; started_at: number; ended_at: number | null; close_reason: PermissionWaitCloseReason | null },
+      [string]
+    >(
+      `SELECT sequence, started_at, ended_at, close_reason FROM delegation_permission_wait
+       WHERE operation_id = ? ORDER BY sequence`,
+    )
+    .all(operationID)
+    .map((row) => ({
+      sequence: row.sequence,
+      startedAt: row.started_at,
+      ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
+      ...(row.close_reason === null ? {} : { closeReason: row.close_reason }),
+    }))
+}
+
+function closePermissionWait(
+  database: Database,
+  operationID: string,
+  endedAt: number,
+  reason: PermissionWaitCloseReason,
+) {
+  const open = database
+    .query<{ sequence: number; started_at: number }, [string]>(
+      "SELECT sequence, started_at FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL",
+    )
+    .get(operationID)
+  if (!open) return false
+  database
+    .query(
+      `UPDATE delegation_permission_wait SET ended_at = ?, close_reason = ?
+       WHERE operation_id = ? AND sequence = ? AND ended_at IS NULL`,
+    )
+    .run(normalizeTime(endedAt, open.started_at), reason, operationID, open.sequence)
+  return true
+}
+
+function normalizeTime(value: number, ...floors: ReadonlyArray<number | undefined>) {
+  return Math.max(value, ...floors.filter((floor): floor is number => floor !== undefined))
+}
+
+function inferReasonCode(
+  state: OperationState,
+  operation: OperationRecord,
+): TerminalReasonCode {
+  if (state === "completed") return "completed"
+  if (state === "failed") return operation.executionStartedAt === undefined ? "setup_failed" : "execution_failed"
+  return "user_interrupted"
+}
+
 function terminal(state: OperationState) {
   return state === "completed" || state === "failed" || state === "interrupted"
 }
@@ -1575,20 +1810,60 @@ function transitionOperation(
   if (expected.length === 0) return false
   return database.transaction(() => {
     const current = loadOperation(database, "o.id", operationID)
-    if (!current || !expected.includes(current.state)) return false
+    if (!current || terminal(current.state) || !expected.includes(current.state)) return false
+    const executionStartedAt =
+      patch.executionStartedAt === undefined
+        ? undefined
+        : normalizeTime(patch.executionStartedAt, current.permitClaimedAt, current.admittedAt)
+    const executionEndedAt =
+      patch.executionEndedAt === undefined
+        ? undefined
+        : normalizeTime(patch.executionEndedAt, current.executionStartedAt, executionStartedAt, current.permitClaimedAt, current.admittedAt)
+    const permissionWaitStartedAt = terminal(state)
+      ? database
+          .query<{ started_at: number }, [string]>(
+            "SELECT started_at FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL",
+          )
+          .get(operationID)?.started_at
+      : undefined
+    const terminalAt =
+      patch.terminalAt === undefined
+        ? undefined
+        : normalizeTime(
+            patch.terminalAt,
+            current.executionEndedAt,
+            executionEndedAt,
+            current.executionStartedAt,
+            executionStartedAt,
+            permissionWaitStartedAt,
+            current.permitClaimedAt,
+            current.admittedAt,
+          )
     const values: Array<string | number | null> = [state]
+    const immutable = new Set([
+      "execution_started_at",
+      "execution_ended_at",
+      "execution_end_source",
+      "completion_observed_at",
+      "terminal_at",
+      "terminal_reason",
+      "terminal_reason_code",
+    ])
     const changes = Object.entries({
       child_id: patch.childID,
       prompt_id: patch.promptID,
       prompt_admitted: patch.promptAdmitted === undefined ? undefined : Number(patch.promptAdmitted),
-      execution_started_at: patch.executionStartedAt,
+      execution_started_at: executionStartedAt,
+      execution_ended_at: executionEndedAt,
+      execution_end_source: patch.executionEndSource,
       completion_observed_at: patch.completionObservedAt,
-      terminal_at: patch.terminalAt,
+      terminal_at: terminalAt,
       terminal_reason: patch.reason,
+      terminal_reason_code: patch.reasonCode ?? (terminal(state) ? inferReasonCode(state, current) : undefined),
     }).flatMap(([column, value]) => {
       if (value === undefined) return []
       values.push(value)
-      return [`${column} = ?`]
+      return [`${column} = ${immutable.has(column) ? `COALESCE(${column}, ?)` : "?"}`]
     })
     values.push(operationID, ...expected)
     const placeholders = expected.map(() => "?").join(", ")
@@ -1610,6 +1885,7 @@ function transitionOperation(
           [string]
         >("SELECT COALESCE(MAX(report_sequence), 0) + 1 AS sequence FROM delegation_terminal_report WHERE parent_id = ?")
         .get(operation.parentID)?.sequence ?? 1
+    closePermissionWait(database, operation.id, operation.terminalAt ?? terminalAt ?? operation.admittedAt, "operation_concluded")
     const metadata = terminalMetadata(operation)
     const outcome =
       state === "completed" ? patch.outcome || "Child completed without a final response." : (operation.reason ?? state)
@@ -1650,8 +1926,11 @@ function terminalMetadata(operation: OperationRecord) {
       admitted: operation.admittedAt,
       ...(operation.permitClaimedAt === undefined ? {} : { permitClaimed: operation.permitClaimedAt }),
       ...(operation.executionStartedAt === undefined ? {} : { executionStarted: operation.executionStartedAt }),
+      ...(operation.executionEndedAt === undefined ? {} : { executionEnded: operation.executionEndedAt }),
       ...(operation.terminalAt === undefined ? {} : { terminal: operation.terminalAt }),
     },
+    ...(operation.executionEndSource === undefined ? {} : { executionEndSource: operation.executionEndSource }),
+    ...(operation.reasonCode === undefined ? {} : { reasonCode: operation.reasonCode }),
     ...(operation.state === "completed" || operation.reason === undefined ? {} : { reason: operation.reason }),
   }
 }
@@ -1685,13 +1964,32 @@ function reconcileStartup(database: Database, reconciledAt: number) {
         .map((row) => row.parent_id),
     )
     const recoveryID = `rcv_${randomUUID().replaceAll("-", "")}`
-    const update = database.query<never, [number, string, string, string]>(
+    const update = database.query<never, [number, number | null, ExecutionEndSource | null, string, number, string, string]>(
       `UPDATE delegation_operation
-       SET state = 'interrupted', terminal_at = ?, terminal_reason = 'service restarted', recovery_id = ?,
-           recovery_previous_state = ?
+       SET state = 'interrupted', terminal_at = ?, execution_ended_at = COALESCE(execution_ended_at, ?),
+            execution_end_source = COALESCE(execution_end_source, ?), terminal_reason = 'service restarted',
+            terminal_reason_code = 'service_restarted', recovery_id = ?, recovery_reconciled_at = ?,
+            recovery_eligible = 1, recovery_previous_state = ?
        WHERE id = ? AND state IN ('starting', 'running', 'waiting')`,
     )
-    active.forEach((operation) => update.run(reconciledAt, recoveryID, operation.state, operation.id))
+    active.forEach((operation) => {
+      const concludedAt = normalizeTime(
+        reconciledAt,
+        operation.executionStartedAt,
+        operation.permitClaimedAt,
+        operation.admittedAt,
+      )
+      closePermissionWait(database, operation.id, concludedAt, "service_restart")
+      update.run(
+        concludedAt,
+        operation.executionStartedAt === undefined ? null : concludedAt,
+        operation.executionStartedAt === undefined ? null : "startup_reconciliation",
+        recoveryID,
+        concludedAt,
+        operation.state,
+        operation.id,
+      )
+    })
     parents.forEach((parentID) => {
       const interrupted = active.filter((operation) => operation.parentID === parentID)
       if (interrupted.length === 0 && pending.has(parentID)) return
@@ -1932,14 +2230,31 @@ const admissionSchema = `
     cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
     permit_claimed_at INTEGER,
     execution_started_at INTEGER,
+    execution_ended_at INTEGER,
+    execution_end_source TEXT CHECK (execution_end_source IN ('session_event', 'startup_reconciliation')),
     completion_observed_at INTEGER,
     terminal_at INTEGER,
     terminal_reason TEXT,
+    terminal_reason_code TEXT CHECK (terminal_reason_code IN ('completed', 'execution_failed', 'setup_failed',
+      'cancelled_before_start', 'user_interrupted', 'child_deleted', 'prompt_admission_uncertain', 'service_restarted')),
     recovery_id TEXT,
+    recovery_reconciled_at INTEGER,
+    recovery_eligible INTEGER NOT NULL DEFAULT 0 CHECK (recovery_eligible IN (0, 1)),
     recovery_previous_state TEXT CHECK (recovery_previous_state IN ('starting', 'running', 'waiting')),
     retry_of_operation_id TEXT REFERENCES delegation_operation(id),
     UNIQUE(batch_id, operation_index)
   );
+  CREATE TABLE delegation_permission_wait (
+    operation_id TEXT NOT NULL REFERENCES delegation_operation(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    close_reason TEXT CHECK (close_reason IN ('replied', 'operation_concluded', 'service_restart')),
+    PRIMARY KEY(operation_id, sequence),
+    CHECK ((ended_at IS NULL AND close_reason IS NULL) OR (ended_at IS NOT NULL AND close_reason IS NOT NULL))
+  );
+  CREATE UNIQUE INDEX delegation_permission_wait_open
+    ON delegation_permission_wait(operation_id) WHERE ended_at IS NULL;
   CREATE TABLE delegation_receipt (
     batch_id TEXT PRIMARY KEY REFERENCES delegation_batch(id) ON DELETE CASCADE,
     message_id TEXT NOT NULL UNIQUE,

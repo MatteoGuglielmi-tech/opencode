@@ -156,6 +156,9 @@ describe("delegation supervision", () => {
     expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({ state: "waiting" })
     await supervisor.handle({ type: "permission.replied", sessionID: "child-1", requestID: "permission-2" })
     expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({ state: "running" })
+    await supervisor.handle({ type: "permission.asked", sessionID: "child-1", requestID: "permission-2" })
+    await supervisor.handle({ type: "permission.replied", sessionID: "child-1", requestID: "permission-2" })
+    expect((await store.snapshot({ parentID: "parent-a" })).operations[0].permissionWaits).toHaveLength(1)
     now = 12
     await supervisor.handle({ type: "session.execution.started", sessionID: "child-1" })
     expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({
@@ -913,6 +916,7 @@ describe("delegation supervision", () => {
         agent: "general",
         model: { providerID: "openai", modelID: "gpt-5" },
         state: "completed",
+        reasonCode: "completed",
         time: { admitted: 1, permitClaimed: expect.any(Number), terminal: expect.any(Number) },
       },
       delivery: "steer",
@@ -936,6 +940,7 @@ describe("delegation supervision", () => {
     })
 
     expect(await store.pendingTerminals()).toHaveLength(1)
+    expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({ reasonCode: "user_interrupted" })
     await store.close()
   })
 

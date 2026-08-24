@@ -88,14 +88,24 @@ describe("Delegation supervision workspace", () => {
       { id: "ses_alpha", admittedAt: 25, terminalAt: 30 },
       { id: "ses_recent", admittedAt: 35, terminalAt: 40 },
     ]
-    await Promise.all(
-      additions.map(async (addition) => {
-        const admitted = await fixture.store.admit(request(addition.id, [addition.id], addition.admittedAt))
-        await fixture.store.transition(admitted.batch.operations[0].id, ["queued"], "completed", {
-          terminalAt: addition.terminalAt,
-        })
-        fixture.sessions.push(session(addition.id, addition.id, addition.terminalAt))
-      }),
+    await additions.reduce(
+      (previous, addition) =>
+        previous.then(async () => {
+          const admitted = await fixture.store.admit(request(addition.id, [addition.id], addition.admittedAt))
+          await fixture.store.acknowledgeReceipt(admitted.batch.id)
+          await fixture.store.claimQueued(1, addition.admittedAt + 1)
+          await fixture.store.transition(admitted.batch.operations[0].id, ["starting"], "running", {
+            executionStartedAt: addition.admittedAt + 2,
+          })
+          await fixture.store.transition(admitted.batch.operations[0].id, ["running"], "completed", {
+            executionEndedAt: addition.terminalAt - 1,
+            executionEndSource: "session_event",
+            terminalAt: addition.terminalAt,
+            reasonCode: "completed",
+          })
+          fixture.sessions.push(session(addition.id, addition.id, addition.terminalAt))
+        }),
+      Promise.resolve(),
     )
 
     const result = await projectWorkspace({
@@ -128,17 +138,17 @@ describe("Delegation supervision workspace", () => {
     expect(query.input).toEqual({
       pluginID: "opencode.delegation",
       query: "supervision",
-      version: "1",
+      version: "2",
       input: {},
     })
     expect(supervisionView(undefined, undefined, { search: "", actionableOnly: false })).toEqual({ type: "loading" })
-    const empty: WorkspaceResult = { type: "workspace", health: { status: "healthy" }, parents: [] }
+    const empty: WorkspaceResult = { type: "workspace", health: { status: "healthy" }, observedAt: 1, parents: [] }
     expect(supervisionView(empty, undefined, { search: "", actionableOnly: false })).toEqual({
       type: "workspace-empty",
     })
     expect(
       supervisionView(
-        { type: "workspace", health: { status: "healthy" }, parents: [parentSummary] },
+        { type: "workspace", health: { status: "healthy" }, observedAt: 1, parents: [parentSummary] },
         undefined,
         { search: "missing", actionableOnly: false },
       ),
@@ -173,7 +183,7 @@ describe("Delegation supervision workspace", () => {
                   project: { id: "project", directory: "/repo", canonical: "/repo" },
                 },
                 data: {
-                  version: "1",
+                  version: "2",
                   output: await Effect.runPromise(
                     definition.execute(Schema.decodeUnknownSync(WorkspaceInput)(input.input)),
                   ),
@@ -220,7 +230,7 @@ describe("Delegation supervision workspace", () => {
         {
           pluginID: "opencode.delegation",
           query: "supervision",
-          version: "1",
+           version: "2",
           input: {},
         },
       ])
@@ -234,13 +244,21 @@ async function workspace() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "opencode-delegation-workspace-"))
   const options = await initializeProfile({ profile: directory })
   const store = await open(options)
-  const parent = await store.admit(request("ses_parent", ["first", "second"], 10))
+  await store.admit(request("ses_parent", ["first", "second"], 10))
   const nested = await store.admit(request("ses_nested", ["nested"], 20))
   const nestedOperationID = nested.batch.operations[0].id
-  await store.transition(nestedOperationID, ["queued"], "starting", {
+  await store.acknowledgeReceipt(nested.batch.id)
+  await store.claimQueued(1, 21)
+  await store.transition(nestedOperationID, ["starting"], "running", {
     childID: "ses_child",
+    executionStartedAt: 22,
   })
-  await store.transition(nestedOperationID, ["starting"], "completed", { terminalAt: 30 })
+  await store.transition(nestedOperationID, ["running"], "completed", {
+    executionEndedAt: 23,
+    executionEndSource: "session_event",
+    terminalAt: 30,
+    reasonCode: "completed",
+  })
   await store.admit(request("ses_deleted", ["deleted"], 40))
   await store.admit(request("ses_cross_location", ["cross"], 50))
   return {
@@ -302,7 +320,7 @@ function client(output: WorkspaceResult) {
                 directory: "/repo",
                 project: { id: "project", directory: "/repo", canonical: "/repo" },
               },
-              data: { version: "1", output },
+              data: { version: "2", output },
             }
           },
         },
@@ -318,6 +336,7 @@ const parentSummary = {
     queued: 1,
     starting: 0,
     running: 0,
+    finalizing: 0,
     waiting: 0,
     completed: 0,
     failed: 0,
@@ -331,4 +350,6 @@ const parentSummary = {
   lastActivityAt: 1,
   newestActionableOperationID: "dop_one",
   newestOperationID: "dop_one",
+  batches: [],
+  operations: [],
 }

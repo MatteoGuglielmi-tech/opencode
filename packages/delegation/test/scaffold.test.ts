@@ -68,6 +68,12 @@ describe("delegation package scaffold", () => {
       ALTER TABLE delegation_recovery DROP COLUMN conflicted;
       ALTER TABLE delegation_control_receipt DROP COLUMN conflicted;
       ALTER TABLE delegation_operation DROP COLUMN completion_observed_at;
+      DROP TABLE delegation_permission_wait;
+      ALTER TABLE delegation_operation DROP COLUMN execution_ended_at;
+      ALTER TABLE delegation_operation DROP COLUMN execution_end_source;
+      ALTER TABLE delegation_operation DROP COLUMN terminal_reason_code;
+      ALTER TABLE delegation_operation DROP COLUMN recovery_reconciled_at;
+      ALTER TABLE delegation_operation DROP COLUMN recovery_eligible;
       UPDATE delegation_meta SET value = '5' WHERE key = 'schema';
       PRAGMA user_version = 5;
     `)
@@ -75,6 +81,18 @@ describe("delegation package scaffold", () => {
 
     await initializeProfile({ profile: tmp.path })
     const store = await open(options)
+    const admitted = await store.admit({
+      parentID: "parent-a",
+      canonical: "migrated",
+      agent: "general",
+      model: { providerID: "openai", modelID: "gpt-5" },
+      files: [],
+      agents: [],
+      skills: [],
+      operations: ["migrated"],
+      admittedAt: 1,
+    })
+    await store.acknowledgeReceipt(admitted.batch.id)
     expect((await store.snapshot({ parentID: "parent-a" })).delivery).toEqual({
       admission: { pending: 0, conflicted: 0 },
       terminal: { pending: 0, conflicted: 0 },
