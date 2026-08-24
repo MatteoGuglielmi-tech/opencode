@@ -179,6 +179,11 @@ export function createSupervisionSynchronization<Permission = never>(input: {
       if (!mounted) return
       void refresh()
     },
+    async reconcile() {
+      await refresh()
+      await serial
+      return state
+    },
     trackAction() {
       localActions++
       if (mounted) void refresh()

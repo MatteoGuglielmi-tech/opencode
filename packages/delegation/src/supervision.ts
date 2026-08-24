@@ -95,6 +95,7 @@ const ProjectedOperation = Schema.Struct({
   text: Schema.String,
   internalState: Schema.Literals(["queued", "starting", "running", "waiting", "completed", "failed", "interrupted"]),
   presentationState: Schema.Literals(["queued", "starting", "running", "waiting", "finalizing", "terminal"]),
+  cancellationRequested: Schema.Boolean,
   agent: Schema.String,
   model: Schema.Struct({
     providerID: Schema.String,
@@ -582,6 +583,7 @@ function projectOperation(
     text: operation.text,
     internalState: operation.state,
     presentationState,
+    cancellationRequested: operation.cancellationRequested,
     agent: operation.agent,
     model: operation.model,
     ...(operation.childID === undefined ? {} : { childID: operation.childID }),

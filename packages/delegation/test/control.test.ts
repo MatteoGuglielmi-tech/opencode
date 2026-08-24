@@ -88,7 +88,7 @@ describe("delegation controls", () => {
     const options = decode({ profile: tmp.path, store: path.join(tmp.path, "coordinator.sqlite"), concurrency: 1 })
     await initialize(options)
     const store = await open(options)
-    const batch = await store.admit(request("parent-a", ["running", "queued"], 1))
+    const batch = await store.admit(request("parent-a", ["running", "queued", "terminal"], 1))
     const other = await store.admit(request("parent-b", ["private"], 2))
     await store.acknowledgeReceipt(batch.batch.id)
     await store.claimQueued(1, 3)
@@ -96,6 +96,7 @@ describe("delegation controls", () => {
       childID: "child-a",
       executionStartedAt: 4,
     })
+    await store.transition(batch.batch.operations[2].id, ["queued"], "failed", { terminalAt: 4 })
 
     const steer = await store.commitControl({
       parentID: "parent-a",
@@ -119,12 +120,25 @@ describe("delegation controls", () => {
       action: { action: "cancel", batchID: batch.batch.id },
       committedAt: 6,
     })
-    expect(cancel.effect).toEqual({ kind: "cancel", operationIDs: batch.batch.operations.map((item) => item.id) })
+    expect(cancel.effect).toEqual({ kind: "cancel", operationIDs: batch.batch.operations.slice(0, 2).map((item) => item.id) })
     expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({ cancellationRequested: true })
     expect(await store.operation(batch.batch.operations[1].id)).toMatchObject({
       state: "interrupted",
       cancellationRequested: true,
     })
+    expect(await store.operation(batch.batch.operations[2].id)).toMatchObject({
+      state: "failed",
+      cancellationRequested: false,
+    })
+    await expect(
+      store.commitControl({
+        parentID: "parent-a",
+        invocationID: "terminal-cancel",
+        canonical: "terminal-cancel",
+        action: { action: "cancel", operationID: batch.batch.operations[2].id },
+        committedAt: 7,
+      }),
+    ).rejects.toMatchObject({ code: "control_invalid" })
     await expect(
       store.commitControl({
         parentID: "parent-a",
@@ -212,15 +226,16 @@ describe("delegation controls", () => {
     const operationID = batch.batch.operations[0].id
     await store.acknowledgeReceipt(batch.batch.id)
     await store.claimQueued(1, 2)
-    await store.transition(operationID, ["starting"], "completed", { terminalAt: 3, outcome: "result" })
-    const blocked = await store.admit(request("parent-a", ["blocked"], 4))
+    await store.transition(operationID, ["starting"], "running", { childID: "child-a", executionStartedAt: 3 })
     await store.commitControl({
       parentID: "parent-a",
       invocationID: "control-1",
-      canonical: "cancel",
-      action: { action: "cancel", operationID },
-      committedAt: 5,
+      canonical: "steer",
+      action: { action: "steer", operationID, text: "focus" },
+      committedAt: 4,
     })
+    await store.transition(operationID, ["running"], "completed", { terminalAt: 5, outcome: "result" })
+    const blocked = await store.admit(request("parent-a", ["blocked"], 6))
     await store.markDeliveryConflict("admission", blocked.batch.id, "parent-a")
     await store.markDeliveryConflict("control", "control-1", "parent-a")
 

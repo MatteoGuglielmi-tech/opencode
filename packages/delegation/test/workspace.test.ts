@@ -581,6 +581,7 @@ function operationSummary(id: string, text: string, state: "queued" | "completed
     text,
     internalState: state,
     presentationState: state === "queued" ? ("queued" as const) : ("terminal" as const),
+    cancellationRequested: false,
     agent: "general",
     model: { providerID: "openai", modelID: "gpt-5" },
     timeline: { admittedAt: 1, permissionWaits: [] },

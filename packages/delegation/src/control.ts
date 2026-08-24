@@ -295,5 +295,11 @@ function renderSnapshot(count: number, cursor: string | undefined) {
 }
 
 function error(cause: unknown) {
+  if (
+    cause instanceof Error &&
+    "code" in cause &&
+    typeof cause.code === "string"
+  )
+    return new Error(`[${cause.code}] ${cause.message}`, { cause })
   return cause instanceof Error ? cause : new Error(String(cause))
 }

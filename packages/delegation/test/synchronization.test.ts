@@ -83,6 +83,24 @@ describe("Delegation supervision synchronization", () => {
     expect(calls).toEqual([0, 0, 1_000, 1_000])
   })
 
+  test("awaits an explicit authoritative reconciliation", async () => {
+    const clock = fakeClock()
+    let calls = 0
+    const harness = createSupervisionSynchronization({
+      clock,
+      load: async () => workspace("running", ++calls),
+      permissions: async () => new Map(),
+      publish() {},
+    })
+
+    harness.start()
+    await harness.idle()
+    const state = await harness.reconcile()
+
+    expect(calls).toBe(2)
+    expect(state).toMatchObject({ freshness: "live", combined: { workspace: { observedAt: 2 } } })
+  })
+
   test("applies delegation facts and required child permissions atomically", async () => {
     const clock = fakeClock()
     const published: SynchronizationState<string>[] = []
@@ -132,6 +150,7 @@ describe("Delegation supervision synchronization", () => {
     await clock.advance(5_000)
     await harness.idle()
     expect(states.at(-1)).toMatchObject({ freshness: "stale", combined: { workspace: { observedAt: 1 } } })
+    expect(harness.mutationsEnabled()).toBe(false)
     expect(calls).toBe(2)
     await clock.advance(999)
     expect(calls).toBe(2)
@@ -319,6 +338,7 @@ function operation(id: string, state: "running" | "terminal") {
     text: id,
     internalState: state === "running" ? ("running" as const) : ("completed" as const),
     presentationState: state,
+    cancellationRequested: false,
     agent: "general",
     model: { providerID: "openai", modelID: "gpt-5" },
     childID: state === "running" ? "ses_child" : undefined,

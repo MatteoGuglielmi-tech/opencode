@@ -1020,9 +1020,15 @@ function commitControlRecord(database: Database, request: ControlRequest): Contr
       : [ownedOperation(database, request.parentID, request.action.operationID)]
     if (operations.length === 0 || operations.some((operation) => operation.parentID !== request.parentID))
       throw new StorageError("control_invalid", "Delegation target is not owned by this parent Session")
+    if (
+      !operations.some(
+        (operation) =>
+          !terminal(operation.state) && operation.completionObservedAt === undefined && !operation.cancellationRequested,
+      )
+    )
+      throw new StorageError("control_invalid", "Delegation cancellation target is no longer cancellable")
     operations.forEach((operation) => {
-      if (terminal(operation.state) || operation.completionObservedAt !== undefined || operation.cancellationRequested)
-        return
+      if (terminal(operation.state) || operation.cancellationRequested) return
       database.query("UPDATE delegation_operation SET cancel_requested = 1 WHERE id = ?").run(operation.id)
       if (operation.state === "queued")
         transitionOperation(database, operation.id, ["queued"], "interrupted", {
@@ -1031,7 +1037,14 @@ function commitControlRecord(database: Database, request: ControlRequest): Contr
           reasonCode: "cancelled_before_start",
         })
     })
-    insertControl(database, request, { effect: { kind: "cancel", operationIDs: operations.map((item) => item.id) } })
+    insertControl(database, request, {
+      effect: {
+        kind: "cancel",
+        operationIDs: operations
+          .filter((operation) => !terminal(operation.state))
+          .map((operation) => operation.id),
+      },
+    })
     return loadControl(database, request.parentID, request.invocationID, true)
   }
 

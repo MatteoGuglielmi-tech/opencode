@@ -2,6 +2,7 @@
 import { Plugin } from "@opencode-ai/plugin/tui"
 import type { Context, Destination, Route } from "@opencode-ai/plugin/tui/context"
 import type { PermissionRequest } from "@opencode-ai/client"
+import { randomUUID } from "node:crypto"
 import { batch, createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import {
   loadSupervision,
@@ -12,6 +13,13 @@ import {
   type WorkspaceResult,
 } from "./supervision.js"
 import { createSupervisionSynchronization, type SynchronizationFailure } from "./synchronization.js"
+import {
+  batchCancellationCounts,
+  createSupervisionControls,
+  operationControls,
+  type PendingSupervisionControl,
+  type SupervisionControlResult,
+} from "./supervision-controls.js"
 import {
   locationIdentity,
   reconcilePresentationState,
@@ -86,6 +94,9 @@ function SupervisionPage(props: {
   }>()
   const [loadingParent, setLoadingParent] = createSignal<string>()
   const [paging, setPaging] = createSignal(false)
+  const [pendingControls, setPendingControls] = createSignal<ReadonlyArray<PendingSupervisionControl>>([])
+  const [steerDrafts, setSteerDrafts] = createSignal<Readonly<Record<string, string>>>({})
+  const [confirmedGeneration, setConfirmedGeneration] = createSignal(0)
   const synchronization = createSupervisionSynchronization<PermissionRequest>({
     load: (request) => loadSupervision(props.context.client, entry(), request),
     permissions: async (childIDs) => {
@@ -103,6 +114,24 @@ function SupervisionPage(props: {
         setCurrent(state.combined.workspace)
       })
     },
+    unresolvedLocal: () => pendingControls().length > 0,
+  })
+  const controls = createSupervisionControls({
+    invocationID: () => `ctl_${randomUUID().replaceAll("-", "")}`,
+    invoke: (input) =>
+      props.context.client.session.command({
+        sessionID: input.parentID,
+        id: input.invocationID,
+        command: "delegation",
+        arguments: input.arguments,
+        delivery: "steer",
+        resume: false,
+      }),
+    reconcile: async () => {
+      const state = await synchronization.reconcile()
+      if (state.freshness !== "live") throw new Error("Authoritative Delegation reconciliation is unavailable")
+    },
+    publish: setPendingControls,
   })
   synchronization.start()
   const stopEvents = props.context.data.listen((event) => {
@@ -139,6 +168,11 @@ function SupervisionPage(props: {
     const parent = ready()?.parents.find((candidate) => candidate.session.id === selectedParent())
     return parent?.operations.find((operation) => operation.id === selectedOperationID()) ?? parent?.operations[0]
   })
+  const selectedBatchOperations = createMemo(() => {
+    const operation = selectedOperation()
+    const parent = ready()?.parents.find((candidate) => candidate.session.id === operation?.parentID)
+    return parent?.operations.filter((candidate) => candidate.batchID === operation?.batchID) ?? []
+  })
   const observedAt = createMemo(() => {
     const result = current()
     return result?.type === "workspace" ? result.observedAt : 0
@@ -148,6 +182,8 @@ function SupervisionPage(props: {
     const childID = selectedOperation()?.childID
     return childID ? (permissions().get(childID) ?? []) : []
   })
+  const pendingFor = (operationID: string) =>
+    pendingControls().find((control) => control.operationIDs.includes(operationID))
   const health = createMemo(() => {
     const result = current()
     if (result?.type === "workspace" && result.health.status === "degraded") return result.health
@@ -228,6 +264,139 @@ function SupervisionPage(props: {
         setPaging(false)
       })
   }
+  const reportControl = (result: SupervisionControlResult, committed: string, operationID?: string) => {
+    if (result.status === "committed") {
+      props.context.ui.toast.show({ variant: "success", message: committed })
+      return true
+    }
+    if (result.status === "blocked") {
+      props.context.ui.toast.show({ variant: "info", message: "This operation already has a Control pending." })
+      return false
+    }
+    if (result.status === "reconciled") {
+      const state = ready()
+        ?.parents.flatMap((parent) => parent.operations)
+        .find((operation) => operation.id === operationID)?.presentationState ?? "unavailable"
+      props.context.ui.toast.show({
+        variant: "info",
+        message: `Control was not applied; the operation is now ${state}.`,
+      })
+      return false
+    }
+    if (result.status === "conflict" || result.status === "defect") {
+      props.context.ui.toast.show({
+        variant: "error",
+        message: `Delegation Control defect (${result.invocationID}): ${result.detail}`,
+      })
+      return false
+    }
+    props.context.ui.toast.show({
+      variant: "warning",
+      message: `Control ${result.invocationID} is still confirming: ${result.detail}`,
+    })
+    return false
+  }
+  createEffect(() => {
+    const result = current()
+    if (result?.type !== "workspace" || freshness() !== "live" || result.generation === confirmedGeneration()) return
+    setConfirmedGeneration(result.generation)
+    const unresolved = controls.pending()
+    if (unresolved.length === 0) return
+    void controls.confirm().then((results) =>
+      results.forEach((control) => {
+        if (control.status === "uncertain") return
+        const action = unresolved.find((candidate) => candidate.invocationID === control.invocationID)?.action
+        const committed = action?.type === "steer" ? "Guidance committed." : "Cancellation requested."
+        if (!reportControl(control, committed, action && "operationID" in action ? action.operationID : undefined) || action?.type !== "steer") return
+        setSteerDrafts((drafts) => ({ ...drafts, [action.operationID]: "" }))
+      }),
+    )
+  })
+  const cancelOperation = async () => {
+    const operation = selectedOperation()
+    if (!operation || !synchronization.mutationsEnabled() || !operationControls(operation, Boolean(pendingFor(operation.id))).cancel)
+      return
+    const complete = synchronization.trackAction()
+    const result = await controls
+      .submit({
+        action: { type: "cancel-operation", parentID: operation.parentID, operationID: operation.id },
+        operationIDs: [operation.id],
+      })
+      .finally(complete)
+    reportControl(result, "Cancellation requested.", operation.id)
+  }
+  const cancelBatch = async () => {
+    if (!synchronization.mutationsEnabled()) return
+    const selected = selectedOperation()
+    if (!selected) return
+    await synchronization.reconcile()
+    if (!synchronization.mutationsEnabled()) return
+    const result = current()
+    if (result?.type !== "workspace") return
+    const parent = result.parents.find((candidate) => candidate.session.id === selected.parentID)
+    const operations = parent?.operations.filter((operation) => operation.batchID === selected.batchID) ?? []
+    if (operations.some((operation) => pendingFor(operation.id))) return
+    const counts = batchCancellationCounts(operations)
+    if (counts.cancellable === 0) {
+      props.context.ui.toast.show({ variant: "info", message: "This batch no longer has cancellable operations." })
+      return
+    }
+    const confirmed = await props.context.ui.dialog.confirm({
+      title: `Cancel batch ${selected.batchID}`,
+      message: `${parent?.session.title ?? selected.parentID}: ${counts.cancellable} cancellable, ${counts.pending} cancellation-pending, ${counts.terminal} terminal. Non-terminal members will be targeted; retained records and child Sessions remain available.`,
+      label: { confirm: "Cancel batch" },
+    })
+    if (!confirmed) return
+    await synchronization.reconcile()
+    if (!synchronization.mutationsEnabled()) return
+    const latest = current()
+    const latestOperations =
+      latest?.type === "workspace"
+        ? (latest.parents
+            .find((candidate) => candidate.session.id === selected.parentID)
+            ?.operations.filter((operation) => operation.batchID === selected.batchID) ?? [])
+        : []
+    const latestCounts = batchCancellationCounts(latestOperations)
+    if (
+      latestCounts.cancellable !== counts.cancellable ||
+      latestCounts.pending !== counts.pending ||
+      latestCounts.terminal !== counts.terminal
+    ) {
+      props.context.ui.toast.show({ variant: "info", message: "Batch state changed; review the refreshed counts." })
+      return cancelBatch()
+    }
+    if (latestOperations.some((operation) => pendingFor(operation.id))) return
+    const complete = synchronization.trackAction()
+    const control = await controls
+      .submit({
+        action: { type: "cancel-batch", parentID: selected.parentID, batchID: selected.batchID },
+        operationIDs: latestCounts.targets,
+      })
+      .finally(complete)
+    reportControl(control, "Batch cancellation requested.", selected.id)
+  }
+  const steerOperation = async () => {
+    const operation = selectedOperation()
+    if (!operation || !synchronization.mutationsEnabled() || !operationControls(operation, Boolean(pendingFor(operation.id))).steer)
+      return
+    const text = await props.context.ui.dialog.prompt({
+      title: "Steer child Session",
+      description: "Guidance is retained until commitment is confirmed.",
+      value: steerDrafts()[operation.id] ?? "",
+    })
+    if (text === undefined) return
+    setSteerDrafts((drafts) => ({ ...drafts, [operation.id]: text }))
+    if (!text.trim()) return
+    const complete = synchronization.trackAction()
+    const result = await controls
+      .submit({
+        action: { type: "steer", parentID: operation.parentID, operationID: operation.id, text: text.trim() },
+        operationIDs: [operation.id],
+      })
+      .finally(complete)
+    if (!reportControl(result, "Guidance committed.", operation.id)) return
+    setSteerDrafts((drafts) => ({ ...drafts, [operation.id]: "" }))
+  }
   const theme = props.context.theme
 
   props.context.keymap.layer(() => ({
@@ -262,6 +431,49 @@ function SupervisionPage(props: {
         run() {
           synchronization.request()
         },
+      },
+      {
+        id: "delegation.supervision.operation.cancel",
+        title: "Cancel operation",
+        bind: "ctrl+x",
+        enabled: () => {
+          const operation = selectedOperation()
+          return Boolean(
+            operation &&
+              synchronization.mutationsEnabled() &&
+              operationControls(operation, Boolean(pendingFor(operation.id))).cancel,
+          )
+        },
+        run: cancelOperation,
+      },
+      {
+        id: "delegation.supervision.batch.cancel",
+        title: "Cancel batch",
+        bind: "ctrl+b",
+        enabled: () => {
+          const operations = selectedBatchOperations()
+          return Boolean(
+            selectedOperation() &&
+              synchronization.mutationsEnabled() &&
+              !operations.some((candidate) => pendingFor(candidate.id)) &&
+              batchCancellationCounts(operations).cancellable > 0,
+          )
+        },
+        run: cancelBatch,
+      },
+      {
+        id: "delegation.supervision.operation.steer",
+        title: "Steer child Session",
+        bind: "ctrl+s",
+        enabled: () => {
+          const operation = selectedOperation()
+          return Boolean(
+            operation &&
+              synchronization.mutationsEnabled() &&
+              operationControls(operation, Boolean(pendingFor(operation.id))).steer,
+          )
+        },
+        run: steerOperation,
       },
       {
         id: "delegation.supervision.filter.search",
@@ -351,6 +563,7 @@ function SupervisionPage(props: {
                           <text fg={theme.text.subdued}>
                             {selectedOperationKey() === operation.id ? "  > " : "    "}
                             {operation.text} [{operation.presentationState}] {timelineTrack(operation, observedAt())}
+                            {pendingFor(operation.id) ? " | Control confirming" : ""}
                           </text>
                         )}
                       </For>
@@ -379,6 +592,35 @@ function SupervisionPage(props: {
                 </For>
                 <Show when={operation().childID}>
                   <text fg={theme.text.subdued}>Open permission requests: {selectedPermissions().length}</text>
+                  <text fg={theme.text.subdued}>Open child Session (Enter)</text>
+                </Show>
+                <Show when={pendingFor(operation().id)}>
+                  <text fg={theme.text.feedback.warning.default}>Control confirming; lifecycle remains authoritative.</text>
+                </Show>
+                <Show
+                  when={
+                    synchronization.mutationsEnabled() &&
+                    operationControls(operation(), Boolean(pendingFor(operation().id))).cancel
+                  }
+                >
+                  <text fg={theme.text.subdued}>Cancel operation (Ctrl+X)</text>
+                </Show>
+                <Show
+                  when={
+                    synchronization.mutationsEnabled() &&
+                    !selectedBatchOperations().some((candidate) => pendingFor(candidate.id)) &&
+                    batchCancellationCounts(selectedBatchOperations()).cancellable > 0
+                  }
+                >
+                  <text fg={theme.text.subdued}>Cancel batch (Ctrl+B)</text>
+                </Show>
+                <Show
+                  when={
+                    synchronization.mutationsEnabled() &&
+                    operationControls(operation(), Boolean(pendingFor(operation().id))).steer
+                  }
+                >
+                  <text fg={theme.text.subdued}>Steer child Session (Ctrl+S)</text>
                 </Show>
               </box>
             )}

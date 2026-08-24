@@ -170,6 +170,7 @@ function operation(
     model: { providerID: "test", modelID: "test" },
     internalState: presentationState === "terminal" ? "completed" : "queued",
     presentationState,
+    cancellationRequested: false,
     timeline: { admittedAt: 1, permissionWaits: [] },
     ...(childID ? { childID } : {}),
   }
