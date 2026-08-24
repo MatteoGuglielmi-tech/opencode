@@ -3,13 +3,30 @@ export * as DelegationSupervision from "./supervision.js"
 import type { OpenCodeClient } from "@opencode-ai/client"
 import { Effect, Schema } from "effect"
 import type { Health } from "./runtime.js"
-import type { OperationRecord, PermissionWait, Store, WorkspaceSnapshot } from "./storage.js"
+import type { DelegationSnapshot, OperationRecord, PermissionWait, Store } from "./storage.js"
 
 export const QUERY = "supervision"
 export const VERSION = "2"
 
 export const WorkspaceInput = Schema.Struct({
   entrySessionID: Schema.optionalKey(Schema.String),
+  generation: Schema.optionalKey(Schema.Number),
+  history: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        parentID: Schema.String,
+        limit: Schema.Number,
+        operationID: Schema.optionalKey(Schema.String),
+      }),
+    ),
+  ),
+  page: Schema.optionalKey(
+    Schema.Struct({
+      parentID: Schema.String,
+      cursor: Schema.String,
+      limit: Schema.Number,
+    }),
+  ),
 })
 export type WorkspaceInput = typeof WorkspaceInput.Type
 
@@ -122,6 +139,7 @@ const ParentSummary = Schema.Struct({
   newestOperationID: Schema.optionalKey(Schema.String),
   batches: Schema.Array(BatchSummary),
   operations: Schema.Array(ProjectedOperation),
+  nextCursor: Schema.optionalKey(Schema.String),
 })
 export type ParentSummary = typeof ParentSummary.Type
 
@@ -141,11 +159,24 @@ const Focus = Schema.Struct({
 
 const Workspace = Schema.Struct({
   type: Schema.Literal("workspace"),
+  generation: Schema.Number,
   health: Health,
   observedAt: Schema.Number,
   parents: Schema.Array(ParentSummary),
   focus: Schema.optionalKey(Focus),
 })
+
+const HistoryPage = Schema.Struct({
+  type: Schema.Literal("history-page"),
+  generation: Schema.Number,
+  observedAt: Schema.Number,
+  parentID: Schema.String,
+  cursor: Schema.String,
+  batches: Schema.Array(BatchSummary),
+  operations: Schema.Array(ProjectedOperation),
+  nextCursor: Schema.optionalKey(Schema.String),
+})
+export type HistoryPage = typeof HistoryPage.Type
 
 const Failure = Schema.Struct({
   type: Schema.Literal("failure"),
@@ -156,7 +187,7 @@ const Failure = Schema.Struct({
   ),
 })
 
-export const WorkspaceResult = Schema.Union([Workspace, Failure])
+export const WorkspaceResult = Schema.Union([Workspace, HistoryPage, Failure])
 export type WorkspaceResult = typeof WorkspaceResult.Type
 
 export type InitialFailure = {
@@ -216,16 +247,55 @@ export async function projectWorkspace(input: {
   try {
     await input.store.readable()
     const observedAt = input.observedAt ?? Date.now()
-    const retained = new Map((await input.store.workspace()).parents.map((parent) => [parent.parentID, parent]))
-    const parents = input.sessions
-      .flatMap((session) => {
-        const snapshot = retained.get(session.id)
-        return snapshot ? [summarize(session, snapshot, observedAt)] : []
+    if (input.input.page) {
+      const session = input.sessions.find((candidate) => candidate.id === input.input.page?.parentID)
+      if (!session) throw new InvalidProjectionError(input.input.page.parentID, "history parent is unavailable")
+      const page = (
+        await input.store.workspaceSnapshots([
+          {
+            parentID: session.id,
+            cursor: input.input.page.cursor,
+            limit: historyLimit(input.input.page.limit),
+          },
+        ])
+      )[0]?.snapshot
+      if (!page) throw new InvalidProjectionError(input.input.page.parentID, "history parent is unavailable")
+      const parent = summarize(session, page, observedAt)
+      return {
+        type: "history-page",
+        generation: input.input.generation ?? 0,
+        observedAt,
+        parentID: session.id,
+        cursor: input.input.page.cursor,
+        batches: parent.batches,
+        operations: parent.operations,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      }
+    }
+    const history = new Map(input.input.history?.map((request) => [request.parentID, request]) ?? [])
+    const sessions = new Map(input.sessions.map((session) => [session.id, session]))
+    const parents = (
+      await input.store.workspaceSnapshots(
+        input.sessions.map((session) => {
+          const request = history.get(session.id)
+          return {
+            parentID: session.id,
+            limit: historyLimit(request?.limit ?? 50),
+            ...(request?.operationID ? { focusOperationID: request.operationID } : {}),
+            ...(input.input.entrySessionID ? { focusChildID: input.input.entrySessionID } : {}),
+          }
+        }),
+      )
+    )
+      .flatMap((result) => {
+        const session = sessions.get(result.parentID)
+        return session ? [summarize(session, result.snapshot, observedAt)] : []
       })
       .toSorted(compareParents)
-    const focus = resolveFocus(parents, retained, input.input.entrySessionID)
+    const focus = resolveFocus(parents, input.input.entrySessionID)
     return {
       type: "workspace",
+      generation: input.input.generation ?? 0,
       health: input.health,
       observedAt,
       parents,
@@ -243,18 +313,12 @@ export async function projectWorkspace(input: {
   }
 }
 
-function resolveFocus(
-  parents: ReadonlyArray<ParentSummary>,
-  retained: ReadonlyMap<string, WorkspaceSnapshot["parents"][number]>,
-  entrySessionID: string | undefined,
-) {
+function resolveFocus(parents: ReadonlyArray<ParentSummary>, entrySessionID: string | undefined) {
   if (entrySessionID) {
     const childParent = parents.find((parent) =>
-      retained.get(parent.session.id)?.operations.some((operation) => operation.childID === entrySessionID),
+      parent.operations.some((operation) => operation.childID === entrySessionID),
     )
-    const child = childParent
-      ? retained.get(childParent.session.id)?.operations.find((operation) => operation.childID === entrySessionID)
-      : undefined
+    const child = childParent?.operations.find((operation) => operation.childID === entrySessionID)
     if (childParent && child) return { parentID: childParent.session.id, operationID: child.id }
     const parent = parents.find((candidate) => candidate.session.id === entrySessionID)
     if (parent) return parentFocus(parent)
@@ -264,7 +328,10 @@ function resolveFocus(
 }
 
 function parentFocus(parent: ParentSummary) {
-  const operationID = parent.newestActionableOperationID ?? parent.newestOperationID
+  const preferred = parent.newestActionableOperationID ?? parent.newestOperationID
+  const operationID = parent.operations.some((operation) => operation.id === preferred)
+    ? preferred
+    : parent.operations[0]?.id
   return { parentID: parent.session.id, ...(operationID ? { operationID } : {}) }
 }
 
@@ -279,14 +346,110 @@ export async function loadSupervision(
     }
   },
   entrySessionID: string | undefined,
+  options?: {
+    readonly generation: number
+    readonly history: ReadonlyArray<{
+      readonly parentID: string
+      readonly limit: number
+      readonly operationID?: string
+    }>
+  },
 ): Promise<WorkspaceResult> {
   const response = await client.plugin.query.invoke({
     pluginID: "opencode.delegation",
     query: QUERY,
     version: VERSION,
-    input: entrySessionID ? { entrySessionID } : {},
+    input: {
+      ...(entrySessionID ? { entrySessionID } : {}),
+      ...(options
+        ? {
+            generation: options.generation,
+            history: options.history.map((request) => ({
+              parentID: request.parentID,
+              limit: request.limit,
+              ...(request.operationID ? { operationID: request.operationID } : {}),
+            })),
+          }
+        : {}),
+    },
   })
   return Schema.decodeUnknownSync(WorkspaceResult)(response.data.output)
+}
+
+export async function loadSupervisionPage(
+  client: Parameters<typeof loadSupervision>[0],
+  input: { readonly generation: number; readonly parentID: string; readonly cursor: string; readonly limit: number },
+) {
+  const response = await client.plugin.query.invoke({
+    pluginID: "opencode.delegation",
+    query: QUERY,
+    version: VERSION,
+    input: {
+      generation: input.generation,
+      page: { parentID: input.parentID, cursor: input.cursor, limit: input.limit },
+    },
+  })
+  const result = Schema.decodeUnknownSync(WorkspaceResult)(response.data.output)
+  if (result.type !== "history-page") throw new Error("Delegation history response is not a page")
+  return result
+}
+
+export function mergeHistoryPage(
+  workspace: Extract<WorkspaceResult, { readonly type: "workspace" }>,
+  page: HistoryPage,
+) {
+  if (page.generation !== workspace.generation) return workspace
+  const index = workspace.parents.findIndex((parent) => parent.session.id === page.parentID)
+  const parent = workspace.parents[index]
+  if (!parent || parent.nextCursor !== page.cursor) return workspace
+  const operations = new Map(parent.operations.map((operation) => [operation.id, operation]))
+  page.operations.forEach((operation) => operations.set(operation.id, operation))
+  const batches = new Map(parent.batches.map((batch) => [batch.id, batch]))
+  page.batches.forEach((batch) => batches.set(batch.id, batch))
+  return {
+    ...workspace,
+    observedAt: page.observedAt,
+    parents: workspace.parents.with(index, {
+      ...parent,
+      operations: [...operations.values()],
+      batches: [...batches.values()],
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : { nextCursor: undefined }),
+    }),
+  }
+}
+
+export function reconcileHistoryRefresh(
+  previous: Extract<WorkspaceResult, { readonly type: "workspace" }>,
+  next: Extract<WorkspaceResult, { readonly type: "workspace" }>,
+) {
+  const previousParent = previous.parents.find((parent) => parent.session.id === previous.focus?.parentID)
+  const nextParent = next.parents.find((parent) => parent.session.id === previous.focus?.parentID)
+  if (!previousParent || !nextParent) return next
+  const selected = previous.focus?.operationID
+  if (nextParent.operations.some((operation) => operation.id === selected)) {
+    return { ...next, focus: { parentID: nextParent.session.id, operationID: selected } }
+  }
+  const selectedIndex = previousParent.operations.findIndex((operation) => operation.id === selected)
+  const surviving =
+    selectedIndex < 0
+      ? undefined
+      : Array.from({ length: previousParent.operations.length }, (_, distance) => distance + 1).flatMap((distance) => {
+          const after = previousParent.operations[selectedIndex + distance]
+          const before = previousParent.operations[selectedIndex - distance]
+          return [after, before].flatMap((operation) =>
+            operation && nextParent.operations.some((candidate) => candidate.id === operation.id) ? [operation] : [],
+          )
+        })[0]
+  const operationID =
+    surviving?.id ??
+    [nextParent.newestActionableOperationID, nextParent.newestOperationID].find((id) =>
+      nextParent.operations.some((operation) => operation.id === id),
+    ) ??
+    nextParent.operations[0]?.id
+  return {
+    ...next,
+    focus: { parentID: nextParent.session.id, ...(operationID ? { operationID } : {}) },
+  }
 }
 
 export function initialFailure(cause: unknown): InitialFailure {
@@ -306,58 +469,75 @@ export function supervisionView(
   if (failure) return { type: "failure", ...failure }
   if (!result) return { type: "loading" }
   if (result.type === "failure") return { type: "failure", code: result.code, detail: result.detail }
+  if (result.type === "history-page") return { type: "failure", code: "invalid_response" }
   if (result.parents.length === 0) return { type: "workspace-empty" }
   const search = filters.search.trim().toLowerCase()
-  const parents = result.parents.filter((parent) => {
-    if (filters.actionableOnly && parent.counts.actionable === 0) return false
-    if (!search) return true
-    return [parent.session.id, parent.session.title ?? "", parent.session.parentID ?? ""].some((value) =>
+  const parents = result.parents.flatMap((parent) => {
+    const sessionMatch = [parent.session.id, parent.session.title ?? "", parent.session.parentID ?? ""].some((value) =>
       value.toLowerCase().includes(search),
     )
+    const operations = parent.operations.filter((operation) => {
+      if (filters.actionableOnly && !actionableProjected(operation)) return false
+      if (!search || sessionMatch) return true
+      return [operation.text, operation.id, operation.batchID, operation.childID ?? ""].some((value) =>
+        value.toLowerCase().includes(search),
+      )
+    })
+    if (operations.length === 0) {
+      if (filters.actionableOnly && !search && parent.counts.actionable > 0)
+        return [{ ...parent, batches: [], operations: [] }]
+      return []
+    }
+    const batches = parent.batches.filter((batch) => operations.some((operation) => operation.batchID === batch.id))
+    return [{ ...parent, batches, operations }]
   })
   if (parents.length === 0) return { type: "filtered-empty" }
   return { type: "ready", parents }
 }
 
-function summarize(
-  session: SessionSummary,
-  snapshot: WorkspaceSnapshot["parents"][number],
-  observedAt: number,
-): ParentSummary {
-  const queuePositions = new Map(
-    snapshot.operations
-      .filter((operation) => operation.state === "queued")
-      .map((operation, index) => [operation.id, index + 1]),
-  )
+function summarize(session: SessionSummary, snapshot: DelegationSnapshot, observedAt: number): ParentSummary {
+  const receiptDelivery = new Map(snapshot.batches.map((batch) => [batch.id, batch.receiptDelivery]))
   const operations = snapshot.operations.map((operation) =>
-    projectOperation(operation, snapshot.receiptDelivery[operation.batchID], queuePositions.get(operation.id), observedAt),
+    projectOperation(
+      operation,
+      receiptDelivery.get(operation.batchID),
+      operation.state === "queued" ? operation.queuePosition : undefined,
+      observedAt,
+    ),
   )
   const counts = {
-    total: operations.length,
-    queued: countProjected(operations, "queued"),
-    starting: countProjected(operations, "starting"),
-    running: countProjected(operations, "running"),
-    finalizing: countProjected(operations, "finalizing"),
-    waiting: countProjected(operations, "waiting"),
-    completed: snapshot.operations.filter((operation) => operation.state === "completed").length,
-    failed: snapshot.operations.filter((operation) => operation.state === "failed").length,
-    interrupted: snapshot.operations.filter((operation) => operation.state === "interrupted").length,
-    cancellationRequested: snapshot.operations.filter((operation) => operation.cancellationRequested).length,
-    recoveryEligible: snapshot.operations.filter((operation) => operation.recoveryEligible).length,
-    actionable: snapshot.operations.filter(actionable).length,
+    total: snapshot.summary.total,
+    queued: snapshot.summary.queued,
+    starting: snapshot.summary.starting,
+    running: snapshot.summary.running,
+    finalizing: snapshot.summary.finalizing,
+    waiting: snapshot.summary.waiting,
+    completed: snapshot.summary.completed,
+    failed: snapshot.summary.failed,
+    interrupted: snapshot.summary.interrupted,
+    cancellationRequested: snapshot.summary.cancellationRequested,
+    recoveryEligible: snapshot.summary.recoveryEligible,
+    actionable: snapshot.summary.actionable,
     deliveryPending: Object.values(snapshot.delivery).reduce((total, value) => total + value.pending, 0),
     deliveryConflicted: Object.values(snapshot.delivery).reduce((total, value) => total + value.conflicted, 0),
   }
-  const activityOrder = snapshot.operations.toSorted(compareOperations)
-  const actionableOperations = activityOrder.filter(actionable)
   return {
     session,
     counts,
-    lastActivityAt: activity(activityOrder[0]) ?? session.updated,
-    ...(actionableOperations[0] ? { newestActionableOperationID: actionableOperations[0].id } : {}),
-    ...(activityOrder[0] ? { newestOperationID: activityOrder[0].id } : {}),
-    batches: projectBatches(snapshot.operations),
+    lastActivityAt: snapshot.summary.lastActivityAt ?? session.updated,
+    ...(snapshot.summary.newestActionableOperationID
+      ? { newestActionableOperationID: snapshot.summary.newestActionableOperationID }
+      : {}),
+    ...(snapshot.summary.newestOperationID ? { newestOperationID: snapshot.summary.newestOperationID } : {}),
+    batches: snapshot.batches.map((batch) => ({
+      id: batch.id,
+      admittedAt: batch.admittedAt,
+      ...(batch.startedAt === undefined ? {} : { startedAt: batch.startedAt }),
+      ...(batch.concludedAt === undefined ? {} : { concludedAt: batch.concludedAt }),
+      outcomes: batch.outcomes,
+    })),
     operations,
+    ...(snapshot.nextCursor ? { nextCursor: snapshot.nextCursor } : {}),
   }
 }
 
@@ -365,8 +545,8 @@ function actionable(operation: OperationRecord) {
   return !["completed", "failed", "interrupted"].includes(operation.state) || operation.recoveryEligible
 }
 
-function countProjected(operations: ReadonlyArray<ProjectedOperation>, state: ProjectedOperation["presentationState"]) {
-  return operations.filter((operation) => operation.presentationState === state).length
+function actionableProjected(operation: ProjectedOperation) {
+  return operation.presentationState !== "terminal" || operation.recovery?.eligible === true
 }
 
 class InvalidProjectionError extends Error {
@@ -376,7 +556,7 @@ class InvalidProjectionError extends Error {
 }
 
 function projectOperation(
-  operation: WorkspaceSnapshot["parents"][number]["operations"][number],
+  operation: DelegationSnapshot["operations"][number],
   receiptDelivery: "acknowledged" | "pending" | "conflicted" | undefined,
   queuePosition: number | undefined,
   observedAt: number,
@@ -447,10 +627,7 @@ function projectOperation(
   }
 }
 
-function validateTimeline(
-  operation: WorkspaceSnapshot["parents"][number]["operations"][number],
-  observedAt: number,
-) {
+function validateTimeline(operation: DelegationSnapshot["operations"][number], observedAt: number) {
   const milestones = [
     operation.admittedAt,
     operation.permitClaimedAt,
@@ -529,28 +706,6 @@ function validatePermissionWaits(
   })
 }
 
-function projectBatches(operations: WorkspaceSnapshot["parents"][number]["operations"]) {
-  const batches = new Map<string, typeof operations>()
-  operations.forEach((operation) => batches.set(operation.batchID, [...(batches.get(operation.batchID) ?? []), operation]))
-  return [...batches.entries()].map(([id, entries]) => {
-    const permits = entries.flatMap((operation) =>
-      operation.permitClaimedAt === undefined ? [] : [operation.permitClaimedAt],
-    )
-    const conclusions = entries.flatMap((operation) => (operation.terminalAt === undefined ? [] : [operation.terminalAt]))
-    return {
-      id,
-      admittedAt: entries[0].admittedAt,
-      ...(permits.length === 0 ? {} : { startedAt: Math.min(...permits) }),
-      ...(conclusions.length !== entries.length ? {} : { concludedAt: Math.max(...conclusions) }),
-      outcomes: {
-        completed: entries.filter((operation) => operation.state === "completed").length,
-        failed: entries.filter((operation) => operation.state === "failed").length,
-        interrupted: entries.filter((operation) => operation.state === "interrupted").length,
-      },
-    }
-  })
-}
-
 function terminal(state: OperationRecord["state"]): state is "completed" | "failed" | "interrupted" {
   return state === "completed" || state === "failed" || state === "interrupted"
 }
@@ -578,4 +733,8 @@ function compareParents(left: ParentSummary, right: ParentSummary) {
   const activityOrder = right.lastActivityAt - left.lastActivityAt
   if (activityOrder !== 0) return activityOrder
   return left.session.id.localeCompare(right.session.id)
+}
+
+function historyLimit(value: number) {
+  return Math.max(1, Math.floor(value))
 }

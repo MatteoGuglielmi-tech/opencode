@@ -48,7 +48,7 @@ describe("delegation supervision", () => {
       batches: [{ id: first.batch.id, sequence: 1 }],
       operations: [{ id: first.batch.operations[0].id, state: "starting", fifoPosition: 1 }],
     })
-    expect(page.nextCursor).toBe("1:0")
+    expect(page.nextCursor).not.toContain(":")
     expect(await store.snapshot({ parentID: "parent-a", cursor: page.nextCursor, limit: 1 })).toMatchObject({
       operations: [{ id: first.batch.operations[1].id, state: "queued", fifoPosition: 2 }],
     })
@@ -56,6 +56,27 @@ describe("delegation supervision", () => {
       batches: [],
       operations: [],
     })
+    await expect(store.snapshot({ parentID: "parent-b", cursor: page.nextCursor, limit: 1 })).rejects.toThrow(
+      "snapshot cursor is invalid",
+    )
+    await store.close()
+  })
+
+  test("continues toward older batches when newer work is inserted concurrently", async () => {
+    await using tmp = await tempDirectory()
+    const options = decode({ profile: tmp.path, store: path.join(tmp.path, "coordinator.sqlite"), concurrency: 1 })
+    await initialize(options)
+    const store = await open(options)
+    const oldest = await store.admit(request("parent-a", ["oldest"], 1))
+    const middle = await store.admit(request("parent-a", ["middle"], 2))
+
+    const first = await store.snapshot({ parentID: "parent-a", limit: 1 })
+    expect(first.operations.map((operation) => operation.id)).toEqual([middle.batch.operations[0].id])
+    const newest = await store.admit(request("parent-a", ["newest"], 3))
+    const older = await store.snapshot({ parentID: "parent-a", cursor: first.nextCursor, limit: 1 })
+
+    expect(older.operations.map((operation) => operation.id)).toEqual([oldest.batch.operations[0].id])
+    expect(older.operations.some((operation) => operation.id === newest.batch.operations[0].id)).toBe(false)
     await store.close()
   })
 
@@ -72,27 +93,28 @@ describe("delegation supervision", () => {
     await store.transition(concluded.batch.operations[1].id, ["queued"], "failed", { terminalAt: 6 })
     await store.transition(concluded.batch.operations[2].id, ["queued"], "interrupted", { terminalAt: 7 })
 
-    expect(await store.snapshot({ parentID: "parent-a", limit: 1 })).toMatchObject({
+    const newest = await store.snapshot({ parentID: "parent-a", limit: 3 })
+    expect(newest).toMatchObject({
       batches: [
         {
-          id: active.batch.id,
-          status: "active",
-          outcomes: { completed: 1, failed: 1, interrupted: 0 },
+          id: concluded.batch.id,
+          status: "concluded",
+          outcomes: { completed: 1, failed: 1, interrupted: 1 },
         },
       ],
     })
     expect(
       await store.snapshot({
         parentID: "parent-a",
-        cursor: `${active.batch.sequence}:${active.batch.operations.at(-1)?.index}`,
+        cursor: newest.nextCursor,
         limit: 1,
       }),
     ).toMatchObject({
       batches: [
         {
-          id: concluded.batch.id,
-          status: "concluded",
-          outcomes: { completed: 1, failed: 1, interrupted: 1 },
+          id: active.batch.id,
+          status: "active",
+          outcomes: { completed: 1, failed: 1, interrupted: 0 },
         },
       ],
     })

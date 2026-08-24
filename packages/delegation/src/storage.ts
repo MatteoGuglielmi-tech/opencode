@@ -118,6 +118,7 @@ export interface DelegationSnapshot {
     OperationRecord & {
       readonly permissionWaits: ReadonlyArray<PermissionWait>
       readonly fifoPosition: number
+      readonly queuePosition: number
       readonly terminalDelivery?: DeliveryState
       readonly recoveryDelivery?: DeliveryState
       readonly terminalOutcome?: {
@@ -127,6 +128,23 @@ export interface DelegationSnapshot {
     }
   >
   readonly delivery: Readonly<Record<DeliveryKind, { readonly pending: number; readonly conflicted: number }>>
+  readonly summary: {
+    readonly total: number
+    readonly queued: number
+    readonly starting: number
+    readonly running: number
+    readonly finalizing: number
+    readonly waiting: number
+    readonly completed: number
+    readonly failed: number
+    readonly interrupted: number
+    readonly cancellationRequested: number
+    readonly recoveryEligible: number
+    readonly actionable: number
+    readonly lastActivityAt: number
+    readonly newestOperationID?: string
+    readonly newestActionableOperationID?: string
+  }
   readonly nextCursor?: string
 }
 
@@ -308,6 +326,11 @@ export interface Store {
   readonly operationByChild: (childID: string) => Promise<OperationRecord | undefined>
   readonly operationsByBatch: (batchID: string) => Promise<ReadonlyArray<OperationRecord>>
   readonly activeByParent: (parentID: string) => Promise<ReadonlyArray<OperationRecord>>
+  readonly workspaceSnapshots: (
+    queries: ReadonlyArray<
+      SnapshotQuery & { readonly focusChildID?: string; readonly focusOperationID?: string }
+    >,
+  ) => Promise<ReadonlyArray<{ readonly parentID: string; readonly snapshot: DelegationSnapshot }>>
   readonly workspace: () => Promise<WorkspaceSnapshot>
   readonly snapshot: (query: SnapshotQuery) => Promise<DelegationSnapshot>
   readonly requestCancellation: (
@@ -524,9 +547,10 @@ export async function open(options: Options): Promise<Store> {
     const operation = loadOperation(database, "o.id", operationID)
     if (!operation || terminal(operation.state)) return false
     const open = database
-      .query<{ sequence: number }, [string]>(
-        "SELECT sequence FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL",
-      )
+      .query<
+        { sequence: number },
+        [string]
+      >("SELECT sequence FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL")
       .get(operationID)
     if (open) return false
     const sequence =
@@ -538,9 +562,15 @@ export async function open(options: Options): Promise<Store> {
         .get(operationID)?.sequence ?? 1
     database
       .query("INSERT INTO delegation_permission_wait (operation_id, sequence, started_at) VALUES (?, ?, ?)")
-      .run(operationID, sequence, normalizeTime(startedAt, operation.executionStartedAt, operation.permitClaimedAt, operation.admittedAt))
+      .run(
+        operationID,
+        sequence,
+        normalizeTime(startedAt, operation.executionStartedAt, operation.permitClaimedAt, operation.admittedAt),
+      )
     database
-      .query("UPDATE delegation_operation SET state = 'waiting' WHERE id = ? AND state IN ('starting', 'running', 'waiting')")
+      .query(
+        "UPDATE delegation_operation SET state = 'waiting' WHERE id = ? AND state IN ('starting', 'running', 'waiting')",
+      )
       .run(operationID)
     return true
   })
@@ -590,10 +620,7 @@ export async function open(options: Options): Promise<Store> {
     async admissionIdentity(parentID, invocationID) {
       if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
       const row = database
-        .query<
-          { agent_id: string; provider_id: string; model_id: string; variant: string | null },
-          [string, string]
-        >(
+        .query<{ agent_id: string; provider_id: string; model_id: string; variant: string | null }, [string, string]>(
           `SELECT agent_id, provider_id, model_id, variant
            FROM delegation_batch WHERE parent_id = ? AND invocation_id = ?`,
         )
@@ -860,10 +887,7 @@ export async function open(options: Options): Promise<Store> {
                    WHERE batch.parent_id = ?`,
                 )
                 .all(row.parent_id)
-                .map((receipt) => [
-                  receipt.batch_id,
-                  deliveryState(receipt.acknowledged, receipt.conflicted),
-                ]),
+                .map((receipt) => [receipt.batch_id, deliveryState(receipt.acknowledged, receipt.conflicted)]),
             ),
             delivery: deliverySummary(database, row.parent_id),
           })),
@@ -871,102 +895,35 @@ export async function open(options: Options): Promise<Store> {
     },
     async snapshot(input) {
       if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
-      const limit = input.limit ?? 50
-      const cursor = input.cursor === undefined ? undefined : parseCursor(input.cursor)
-      const conditions = [
-        ...(input.batchID === undefined ? [] : ["batch_id = ?"]),
-        ...(input.operationID === undefined ? [] : ["id = ?"]),
-        ...(input.state === undefined ? [] : ["state = ?"]),
-        ...(cursor === undefined
-          ? []
-          : ["(admission_sequence > ? OR (admission_sequence = ? AND operation_index > ?))"]),
-      ]
-      const values: Array<string | number> = [
-        input.parentID,
-        ...(input.batchID === undefined ? [] : [input.batchID]),
-        ...(input.operationID === undefined ? [] : [input.operationID]),
-        ...(input.state === undefined ? [] : [input.state]),
-        ...(cursor === undefined ? [] : [cursor.sequence, cursor.sequence, cursor.index]),
-        limit + 1,
-      ]
-      const rows = database
-        .query<SnapshotRow, Array<string | number>>(
-          `WITH scoped AS (
-             SELECT o.*, b.parent_id, b.admission_sequence, b.agent_id, b.provider_id, b.model_id, b.variant,
-                     b.shared_context, b.admitted_at, b.files, b.agents, b.skills,
-                     r.acknowledged AS receipt_acknowledged, r.conflicted AS receipt_conflicted,
-                     COUNT(*) OVER (PARTITION BY b.id) AS batch_operation_count,
-                     SUM(CASE WHEN o.state IN ('completed', 'failed', 'interrupted') THEN 1 ELSE 0 END)
-                       OVER (PARTITION BY b.id) AS batch_terminal_count,
-                     SUM(CASE WHEN o.state = 'completed' THEN 1 ELSE 0 END)
-                       OVER (PARTITION BY b.id) AS batch_completed_count,
-                     SUM(CASE WHEN o.state = 'failed' THEN 1 ELSE 0 END)
-                       OVER (PARTITION BY b.id) AS batch_failed_count,
-                      SUM(CASE WHEN o.state = 'interrupted' THEN 1 ELSE 0 END)
-                        OVER (PARTITION BY b.id) AS batch_interrupted_count,
-                      MIN(o.permit_claimed_at) OVER (PARTITION BY b.id) AS batch_started_at,
-                      MAX(o.terminal_at) OVER (PARTITION BY b.id) AS batch_concluded_at,
-                      ROW_NUMBER() OVER (ORDER BY b.admission_sequence, o.operation_index) AS fifo_position
-             FROM delegation_operation o
-             JOIN delegation_batch b ON b.id = o.batch_id
-             JOIN delegation_receipt r ON r.batch_id = b.id
-             WHERE b.parent_id = ?
-           )
-            SELECT scoped.*, terminal.text AS terminal_text, terminal.metadata AS terminal_metadata,
-                   terminal.acknowledged AS terminal_acknowledged, terminal.conflicted AS terminal_conflicted,
-                   recovery.acknowledged AS recovery_acknowledged, recovery.conflicted AS recovery_conflicted
-           FROM scoped
-           LEFT JOIN delegation_terminal_report terminal ON terminal.operation_id = scoped.id
-           LEFT JOIN delegation_recovery recovery
-             ON recovery.recovery_id = scoped.recovery_id AND recovery.parent_id = scoped.parent_id
-           ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`}
-           ORDER BY admission_sequence, operation_index
-           LIMIT ?`,
-        )
-        .all(...values)
-      const page = rows.slice(0, limit)
-      const batches = new Map<string, DelegationSnapshot["batches"][number]>()
-      page.forEach((row) =>
-        batches.set(row.batch_id, {
-          id: row.batch_id,
-          sequence: row.admission_sequence,
-          admittedAt: row.admitted_at,
-          ...(row.batch_started_at === null ? {} : { startedAt: row.batch_started_at }),
-          ...(row.batch_terminal_count !== row.batch_operation_count || row.batch_concluded_at === null
-            ? {}
-            : { concludedAt: row.batch_concluded_at }),
-          receiptDelivery: deliveryState(row.receipt_acknowledged, row.receipt_conflicted),
-          status: row.batch_terminal_count === row.batch_operation_count ? "concluded" : "active",
-          outcomes: {
-            completed: row.batch_completed_count,
-            failed: row.batch_failed_count,
-            interrupted: row.batch_interrupted_count,
-          },
+      return database.transaction(() => delegationSnapshot(database, input))()
+    },
+    async workspaceSnapshots(queries) {
+      if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
+      return database.transaction(() =>
+        queries.flatMap((query) => {
+          const retained = database
+            .query<
+              { retained: number },
+              [string]
+            >("SELECT 1 AS retained FROM delegation_batch WHERE parent_id = ? LIMIT 1")
+            .get(query.parentID)
+          if (!retained) return []
+          const focusDepth = query.focusChildID
+            ? childHistoryDepth(database, query.parentID, query.focusChildID)
+            : query.focusOperationID
+              ? operationHistoryDepth(database, query.parentID, query.focusOperationID)
+              : undefined
+          return [
+            {
+              parentID: query.parentID,
+              snapshot: delegationSnapshot(database, {
+                ...query,
+                limit: Math.max(query.limit ?? 50, focusDepth ?? 0),
+              }),
+            },
+          ]
         }),
-      )
-      const last = page.at(-1)
-      return {
-        version: 1,
-        batches: [...batches.values()],
-        operations: page.map((row) => ({
-          ...operationRecord(row),
-          permissionWaits: loadPermissionWaits(database, row.id),
-          fifoPosition: row.fifo_position,
-          ...(row.terminal_acknowledged === null
-            ? {}
-            : { terminalDelivery: deliveryState(row.terminal_acknowledged, row.terminal_conflicted ?? 0) }),
-          ...(row.recovery_acknowledged === null
-            ? {}
-            : { recoveryDelivery: deliveryState(row.recovery_acknowledged, row.recovery_conflicted ?? 0) }),
-          ...(row.terminal_text === null || row.terminal_metadata === null
-            ? {}
-            : { terminalOutcome: { report: row.terminal_text, metadata: jsonRecord(row.terminal_metadata) } }),
-        })),
-        delivery: deliverySummary(database, input.parentID),
-        ...(rows.length <= limit || last === undefined
-          ? {}
-          : { nextCursor: `${last.admission_sequence}:${last.operation_index}` }),
-      }
+      )()
     },
     async requestCancellation(operationID, cancelledAt) {
       if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
@@ -1019,6 +976,7 @@ function safeStore(store: Store): Store {
     operationByChild: safeMethod(store.operationByChild),
     operationsByBatch: safeMethod(store.operationsByBatch),
     activeByParent: safeMethod(store.activeByParent),
+    workspaceSnapshots: safeMethod(store.workspaceSnapshots),
     workspace: safeMethod(store.workspace),
     snapshot: safeMethod(store.snapshot),
     requestCancellation: safeMethod(store.requestCancellation),
@@ -1595,6 +1553,7 @@ type OperationRow = {
 type SnapshotRow = OperationRow & {
   admission_sequence: number
   fifo_position: number
+  queue_position: number
   batch_operation_count: number
   batch_terminal_count: number
   batch_completed_count: number
@@ -1610,6 +1569,22 @@ type SnapshotRow = OperationRow & {
   terminal_metadata: string | null
   recovery_acknowledged: number | null
   recovery_conflicted: number | null
+}
+
+type SnapshotSummaryRow = {
+  total: number
+  queued: number
+  starting: number
+  running: number
+  finalizing: number
+  waiting: number
+  completed: number
+  failed: number
+  interrupted: number
+  cancellation_requested: number
+  recovery_eligible: number
+  actionable: number
+  last_activity_at: number
 }
 
 type DeliveryRow = {
@@ -1663,10 +1638,226 @@ function operationRecord(row: OperationRow): OperationRecord {
   }
 }
 
-function parseCursor(value: string) {
-  const match = /^(0|[1-9]\d*):(0|[1-9]\d*)$/.exec(value)
-  if (!match) throw new StorageError("store_corrupt", "Delegation snapshot cursor is invalid")
-  return { sequence: Number(match[1]), index: Number(match[2]) }
+function childHistoryDepth(database: Database, parentID: string, childID: string) {
+  const operationID = database
+    .query<{ id: string }, [string, string]>(
+      `SELECT o.id FROM delegation_operation o JOIN delegation_batch b ON b.id = o.batch_id
+       WHERE o.child_id = ? AND b.parent_id = ?`,
+    )
+    .get(childID, parentID)?.id
+  return operationID ? operationHistoryDepth(database, parentID, operationID) : undefined
+}
+
+function operationHistoryDepth(database: Database, parentID: string, operationID: string) {
+  return database
+    .query<{ depth: number }, [string, string]>(
+      `SELECT COUNT(*) AS depth
+       FROM delegation_operation candidate
+       JOIN delegation_batch candidate_batch ON candidate_batch.id = candidate.batch_id
+       JOIN delegation_operation target ON target.id = ?
+       JOIN delegation_batch target_batch ON target_batch.id = target.batch_id
+       WHERE target_batch.parent_id = ? AND candidate_batch.parent_id = target_batch.parent_id
+         AND (candidate_batch.admission_sequence > target_batch.admission_sequence
+           OR (candidate_batch.admission_sequence = target_batch.admission_sequence
+             AND candidate.operation_index <= target.operation_index))`,
+    )
+    .get(operationID, parentID)?.depth
+}
+
+function delegationSnapshot(database: Database, input: SnapshotQuery): DelegationSnapshot {
+  const limit = input.limit ?? 50
+  const cursor = input.cursor === undefined ? undefined : parseCursor(input.cursor, input.parentID)
+  const conditions = [
+    ...(input.batchID === undefined ? [] : ["batch_id = ?"]),
+    ...(input.operationID === undefined ? [] : ["id = ?"]),
+    ...(input.state === undefined ? [] : ["state = ?"]),
+    ...(cursor === undefined ? [] : ["(admission_sequence < ? OR (admission_sequence = ? AND operation_index > ?))"]),
+  ]
+  const values: Array<string | number> = [
+    input.parentID,
+    ...(input.batchID === undefined ? [] : [input.batchID]),
+    ...(input.operationID === undefined ? [] : [input.operationID]),
+    ...(input.state === undefined ? [] : [input.state]),
+    ...(cursor === undefined ? [] : [cursor.sequence, cursor.sequence, cursor.index]),
+    limit + 1,
+  ]
+  const rows = database
+    .query<SnapshotRow, Array<string | number>>(
+      `WITH scoped AS (
+         SELECT o.*, b.parent_id, b.admission_sequence, b.agent_id, b.provider_id, b.model_id, b.variant,
+                b.shared_context, b.admitted_at, b.files, b.agents, b.skills,
+                r.acknowledged AS receipt_acknowledged, r.conflicted AS receipt_conflicted,
+                COUNT(*) OVER (PARTITION BY b.id) AS batch_operation_count,
+                SUM(CASE WHEN o.state IN ('completed', 'failed', 'interrupted') THEN 1 ELSE 0 END)
+                  OVER (PARTITION BY b.id) AS batch_terminal_count,
+                SUM(CASE WHEN o.state = 'completed' THEN 1 ELSE 0 END)
+                  OVER (PARTITION BY b.id) AS batch_completed_count,
+                SUM(CASE WHEN o.state = 'failed' THEN 1 ELSE 0 END)
+                  OVER (PARTITION BY b.id) AS batch_failed_count,
+                SUM(CASE WHEN o.state = 'interrupted' THEN 1 ELSE 0 END)
+                  OVER (PARTITION BY b.id) AS batch_interrupted_count,
+                MIN(o.permit_claimed_at) OVER (PARTITION BY b.id) AS batch_started_at,
+                MAX(o.terminal_at) OVER (PARTITION BY b.id) AS batch_concluded_at,
+                ROW_NUMBER() OVER (ORDER BY b.admission_sequence, o.operation_index) AS fifo_position,
+                SUM(CASE WHEN o.state = 'queued' THEN 1 ELSE 0 END)
+                  OVER (ORDER BY b.admission_sequence, o.operation_index) AS queue_position
+         FROM delegation_operation o
+         JOIN delegation_batch b ON b.id = o.batch_id
+         JOIN delegation_receipt r ON r.batch_id = b.id
+         WHERE b.parent_id = ?
+       )
+       SELECT scoped.*, terminal.text AS terminal_text, terminal.metadata AS terminal_metadata,
+              terminal.acknowledged AS terminal_acknowledged, terminal.conflicted AS terminal_conflicted,
+              recovery.acknowledged AS recovery_acknowledged, recovery.conflicted AS recovery_conflicted
+       FROM scoped
+       LEFT JOIN delegation_terminal_report terminal ON terminal.operation_id = scoped.id
+       LEFT JOIN delegation_recovery recovery
+         ON recovery.recovery_id = scoped.recovery_id AND recovery.parent_id = scoped.parent_id
+       ${conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`}
+       ORDER BY admission_sequence DESC, operation_index
+       LIMIT ?`,
+    )
+    .all(...values)
+  const page = rows.slice(0, limit)
+  const batches = new Map<string, DelegationSnapshot["batches"][number]>()
+  page.forEach((row) =>
+    batches.set(row.batch_id, {
+      id: row.batch_id,
+      sequence: row.admission_sequence,
+      admittedAt: row.admitted_at,
+      ...(row.batch_started_at === null ? {} : { startedAt: row.batch_started_at }),
+      ...(row.batch_terminal_count !== row.batch_operation_count || row.batch_concluded_at === null
+        ? {}
+        : { concludedAt: row.batch_concluded_at }),
+      receiptDelivery: deliveryState(row.receipt_acknowledged, row.receipt_conflicted),
+      status: row.batch_terminal_count === row.batch_operation_count ? "concluded" : "active",
+      outcomes: {
+        completed: row.batch_completed_count,
+        failed: row.batch_failed_count,
+        interrupted: row.batch_interrupted_count,
+      },
+    }),
+  )
+  const last = page.at(-1)
+  return {
+    version: 1,
+    batches: [...batches.values()],
+    operations: page.map((row) => ({
+      ...operationRecord(row),
+      permissionWaits: loadPermissionWaits(database, row.id),
+      fifoPosition: row.fifo_position,
+      queuePosition: row.queue_position,
+      ...(row.terminal_acknowledged === null
+        ? {}
+        : { terminalDelivery: deliveryState(row.terminal_acknowledged, row.terminal_conflicted ?? 0) }),
+      ...(row.recovery_acknowledged === null
+        ? {}
+        : { recoveryDelivery: deliveryState(row.recovery_acknowledged, row.recovery_conflicted ?? 0) }),
+      ...(row.terminal_text === null || row.terminal_metadata === null
+        ? {}
+        : { terminalOutcome: { report: row.terminal_text, metadata: jsonRecord(row.terminal_metadata) } }),
+    })),
+    delivery: deliverySummary(database, input.parentID),
+    summary: snapshotSummary(database, input.parentID),
+    ...(rows.length <= limit || last === undefined
+      ? {}
+      : { nextCursor: renderCursor(input.parentID, last.admission_sequence, last.operation_index) }),
+  }
+}
+
+function snapshotSummary(database: Database, parentID: string): DelegationSnapshot["summary"] {
+  const activity =
+    "COALESCE(o.terminal_at, o.completion_observed_at, o.execution_started_at, o.permit_claimed_at, b.admitted_at)"
+  const summary = database
+    .query<SnapshotSummaryRow, [string]>(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN o.state = 'queued' THEN 1 ELSE 0 END) AS queued,
+              SUM(CASE WHEN o.state NOT IN ('completed', 'failed', 'interrupted') AND o.state != 'waiting'
+                        AND o.execution_ended_at IS NULL AND o.execution_started_at IS NULL
+                        AND o.permit_claimed_at IS NOT NULL THEN 1 ELSE 0 END) AS starting,
+              SUM(CASE WHEN o.state NOT IN ('completed', 'failed', 'interrupted') AND o.state != 'waiting'
+                        AND o.execution_ended_at IS NULL AND o.execution_started_at IS NOT NULL THEN 1 ELSE 0 END) AS running,
+              SUM(CASE WHEN o.state NOT IN ('completed', 'failed', 'interrupted')
+                        AND o.execution_ended_at IS NOT NULL THEN 1 ELSE 0 END) AS finalizing,
+              SUM(CASE WHEN o.state = 'waiting' AND o.execution_ended_at IS NULL THEN 1 ELSE 0 END) AS waiting,
+              SUM(CASE WHEN o.state = 'completed' THEN 1 ELSE 0 END) AS completed,
+              SUM(CASE WHEN o.state = 'failed' THEN 1 ELSE 0 END) AS failed,
+              SUM(CASE WHEN o.state = 'interrupted' THEN 1 ELSE 0 END) AS interrupted,
+              SUM(o.cancel_requested) AS cancellation_requested,
+              SUM(o.recovery_eligible) AS recovery_eligible,
+              SUM(CASE WHEN o.state NOT IN ('completed', 'failed', 'interrupted') OR o.recovery_eligible = 1
+                       THEN 1 ELSE 0 END) AS actionable,
+              MAX(${activity}) AS last_activity_at
+       FROM delegation_operation o
+       JOIN delegation_batch b ON b.id = o.batch_id
+       WHERE b.parent_id = ?`,
+    )
+    .get(parentID)
+  if (!summary) throw new StorageError("store_corrupt", `Delegation parent ${parentID} has no retained operations`)
+  const newest = database
+    .query<{ id: string; recovery_eligible: number; state: OperationState }, [string]>(
+      `SELECT o.id, o.recovery_eligible, o.state
+       FROM delegation_operation o
+       JOIN delegation_batch b ON b.id = o.batch_id
+       WHERE b.parent_id = ?
+       ORDER BY ${activity} DESC, o.id
+       LIMIT 1`,
+    )
+    .get(parentID)
+  const newestActionable = database
+    .query<{ id: string }, [string]>(
+      `SELECT o.id
+       FROM delegation_operation o
+       JOIN delegation_batch b ON b.id = o.batch_id
+       WHERE b.parent_id = ?
+         AND (o.state NOT IN ('completed', 'failed', 'interrupted') OR o.recovery_eligible = 1)
+       ORDER BY ${activity} DESC, o.id
+       LIMIT 1`,
+    )
+    .get(parentID)
+  return {
+    total: summary.total,
+    queued: summary.queued,
+    starting: summary.starting,
+    running: summary.running,
+    finalizing: summary.finalizing,
+    waiting: summary.waiting,
+    completed: summary.completed,
+    failed: summary.failed,
+    interrupted: summary.interrupted,
+    cancellationRequested: summary.cancellation_requested,
+    recoveryEligible: summary.recovery_eligible,
+    actionable: summary.actionable,
+    lastActivityAt: summary.last_activity_at,
+    ...(newest ? { newestOperationID: newest.id } : {}),
+    ...(newestActionable ? { newestActionableOperationID: newestActionable.id } : {}),
+  }
+}
+
+function parseCursor(value: string, parentID: string) {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString()) as unknown
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("version" in parsed) ||
+      parsed.version !== 1 ||
+      !("parentID" in parsed) ||
+      parsed.parentID !== parentID ||
+      !("sequence" in parsed) ||
+      !Number.isSafeInteger(parsed.sequence) ||
+      !("index" in parsed) ||
+      !Number.isSafeInteger(parsed.index)
+    )
+      throw new Error("invalid cursor")
+    return { sequence: parsed.sequence as number, index: parsed.index as number }
+  } catch {
+    throw new StorageError("store_corrupt", "Delegation snapshot cursor is invalid")
+  }
+}
+
+function renderCursor(parentID: string, sequence: number, index: number) {
+  return Buffer.from(JSON.stringify({ version: 1, parentID, sequence, index })).toString("base64url")
 }
 
 function deliveryIntent(row: DeliveryRow): DeliveryIntent {
@@ -1769,9 +1960,10 @@ function closePermissionWait(
   reason: PermissionWaitCloseReason,
 ) {
   const open = database
-    .query<{ sequence: number; started_at: number }, [string]>(
-      "SELECT sequence, started_at FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL",
-    )
+    .query<
+      { sequence: number; started_at: number },
+      [string]
+    >("SELECT sequence, started_at FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL")
     .get(operationID)
   if (!open) return false
   database
@@ -1787,10 +1979,7 @@ function normalizeTime(value: number, ...floors: ReadonlyArray<number | undefine
   return Math.max(value, ...floors.filter((floor): floor is number => floor !== undefined))
 }
 
-function inferReasonCode(
-  state: OperationState,
-  operation: OperationRecord,
-): TerminalReasonCode {
+function inferReasonCode(state: OperationState, operation: OperationRecord): TerminalReasonCode {
   if (state === "completed") return "completed"
   if (state === "failed") return operation.executionStartedAt === undefined ? "setup_failed" : "execution_failed"
   return "user_interrupted"
@@ -1818,12 +2007,19 @@ function transitionOperation(
     const executionEndedAt =
       patch.executionEndedAt === undefined
         ? undefined
-        : normalizeTime(patch.executionEndedAt, current.executionStartedAt, executionStartedAt, current.permitClaimedAt, current.admittedAt)
+        : normalizeTime(
+            patch.executionEndedAt,
+            current.executionStartedAt,
+            executionStartedAt,
+            current.permitClaimedAt,
+            current.admittedAt,
+          )
     const permissionWaitStartedAt = terminal(state)
       ? database
-          .query<{ started_at: number }, [string]>(
-            "SELECT started_at FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL",
-          )
+          .query<
+            { started_at: number },
+            [string]
+          >("SELECT started_at FROM delegation_permission_wait WHERE operation_id = ? AND ended_at IS NULL")
           .get(operationID)?.started_at
       : undefined
     const terminalAt =
@@ -1885,7 +2081,12 @@ function transitionOperation(
           [string]
         >("SELECT COALESCE(MAX(report_sequence), 0) + 1 AS sequence FROM delegation_terminal_report WHERE parent_id = ?")
         .get(operation.parentID)?.sequence ?? 1
-    closePermissionWait(database, operation.id, operation.terminalAt ?? terminalAt ?? operation.admittedAt, "operation_concluded")
+    closePermissionWait(
+      database,
+      operation.id,
+      operation.terminalAt ?? terminalAt ?? operation.admittedAt,
+      "operation_concluded",
+    )
     const metadata = terminalMetadata(operation)
     const outcome =
       state === "completed" ? patch.outcome || "Child completed without a final response." : (operation.reason ?? state)
@@ -1964,7 +2165,10 @@ function reconcileStartup(database: Database, reconciledAt: number) {
         .map((row) => row.parent_id),
     )
     const recoveryID = `rcv_${randomUUID().replaceAll("-", "")}`
-    const update = database.query<never, [number, number | null, ExecutionEndSource | null, string, number, string, string]>(
+    const update = database.query<
+      never,
+      [number, number | null, ExecutionEndSource | null, string, number, string, string]
+    >(
       `UPDATE delegation_operation
        SET state = 'interrupted', terminal_at = ?, execution_ended_at = COALESCE(execution_ended_at, ?),
             execution_end_source = COALESCE(execution_end_source, ?), terminal_reason = 'service restarted',

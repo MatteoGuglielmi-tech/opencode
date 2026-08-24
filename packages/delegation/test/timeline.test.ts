@@ -239,10 +239,10 @@ describe("Delegation operation timelines", () => {
     const result = await projection(fixture.store, 30)
     if (result.type !== "workspace") throw new Error("expected workspace")
     expect(result.parents[0].operations.map((operation) => operation.outcome?.reason.code)).toEqual([
+      "cancelled_before_start",
       "setup_failed",
       "execution_failed",
       "user_interrupted",
-      "cancelled_before_start",
     ])
   })
 

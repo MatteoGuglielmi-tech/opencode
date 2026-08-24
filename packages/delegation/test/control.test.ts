@@ -225,13 +225,13 @@ describe("delegation controls", () => {
     await store.markDeliveryConflict("control", "control-1", "parent-a")
 
     expect(await store.snapshot({ parentID: "parent-a" })).toMatchObject({
-      batches: [{ receiptDelivery: "acknowledged" }, { receiptDelivery: "conflicted" }],
+      batches: [{ receiptDelivery: "conflicted" }, { receiptDelivery: "acknowledged" }],
       operations: [
+        { state: "queued" },
         {
           terminalDelivery: "pending",
           terminalOutcome: { report: expect.stringContaining("result"), metadata: { kind: "terminal-outcome" } },
         },
-        { state: "queued" },
       ],
       delivery: {
         admission: { pending: 0, conflicted: 1 },

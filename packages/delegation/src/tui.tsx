@@ -1,12 +1,16 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode-ai/plugin/tui"
 import type { Context, Destination, Route } from "@opencode-ai/plugin/tui/context"
-import { createMemo, createResource, For, Match, Show, Switch } from "solid-js"
+import { createEffect, createMemo, createResource, createSignal, For, Match, Show, Switch } from "solid-js"
 import {
   initialFailure,
   loadSupervision,
+  loadSupervisionPage,
+  mergeHistoryPage,
+  reconcileHistoryRefresh,
   type ProjectedOperation,
   supervisionView,
+  type WorkspaceResult,
 } from "./supervision.js"
 
 const PAGE = "supervision"
@@ -41,15 +45,39 @@ function SupervisionPage(props: { readonly context: Context }) {
     const value = route.data?.entrySessionID
     return typeof value === "string" ? value : undefined
   }
+  const [current, setCurrent] = createSignal<WorkspaceResult>()
+  const [refreshRequest, setRefreshRequest] = createSignal<{
+    readonly generation: number
+    readonly history: ReadonlyArray<{
+      readonly parentID: string
+      readonly limit: number
+      readonly operationID?: string
+    }>
+  }>()
   const [workspace] = createResource(
-    () => ({ entrySessionID: entry() }),
-    (input) => loadSupervision(props.context.client, input.entrySessionID),
+    () => ({ entrySessionID: entry(), refresh: refreshRequest() }),
+    (input) => loadSupervision(props.context.client, input.entrySessionID, input.refresh),
   )
+  const [search, setSearch] = createSignal("")
+  const [actionableOnly, setActionableOnly] = createSignal(false)
+  const [paginationFailure, setPaginationFailure] = createSignal<{
+    readonly parentID: string
+    readonly cursor: string
+  }>()
+  const [loadingParent, setLoadingParent] = createSignal<string>()
+  const [paging, setPaging] = createSignal(false)
+  createEffect(() => {
+    const result = workspace()
+    if (!result) return
+    setCurrent((value) =>
+      value?.type === "workspace" && result.type === "workspace" ? reconcileHistoryRefresh(value, result) : result,
+    )
+  })
   const failure = createMemo(() => (workspace.error ? initialFailure(workspace.error) : undefined))
   const view = createMemo(() =>
-    supervisionView(workspace(), failure(), {
-      search: "",
-      actionableOnly: false,
+    supervisionView(current(), failure(), {
+      search: search(),
+      actionableOnly: actionableOnly(),
     }),
   )
   const failed = createMemo(() => {
@@ -61,26 +89,73 @@ function SupervisionPage(props: { readonly context: Context }) {
     if (current.type === "ready") return current
   })
   const selectedParent = createMemo(() => {
-    const current = workspace()
-    if (current?.type === "workspace") return current.focus?.parentID
-  })
-  const selectedOperation = createMemo(() => {
-    const current = workspace()
-    if (current?.type !== "workspace") return undefined
-    const parent = current.parents.find((candidate) => candidate.session.id === current.focus?.parentID)
+    const visible = ready()?.parents
+    if (!visible) return
+    const result = current()
     return (
-      parent?.operations.find((operation) => operation.id === current.focus?.operationID) ?? parent?.operations[0]
+      visible.find(
+        (parent) => parent.session.id === (result?.type === "workspace" ? result.focus?.parentID : undefined),
+      )?.session.id ?? visible[0]?.session.id
     )
   })
+  const selectedOperation = createMemo(() => {
+    const parent = ready()?.parents.find((candidate) => candidate.session.id === selectedParent())
+    const result = current()
+    const operationID = result?.type === "workspace" ? result.focus?.operationID : undefined
+    return parent?.operations.find((operation) => operation.id === operationID) ?? parent?.operations[0]
+  })
   const observedAt = createMemo(() => {
-    const current = workspace()
-    return current?.type === "workspace" ? current.observedAt : 0
+    const result = current()
+    return result?.type === "workspace" ? result.observedAt : 0
   })
   const selectedOperationID = createMemo(() => selectedOperation()?.id)
   const health = createMemo(() => {
-    const current = workspace()
-    if (current?.type === "workspace" && current.health.status === "degraded") return current.health
+    const result = current()
+    if (result?.type === "workspace" && result.health.status === "degraded") return result.health
   })
+  const loadOlder = async () => {
+    const result = current()
+    if (result?.type !== "workspace") return
+    const available = result.parents.filter((parent) => parent.nextCursor)
+    if (available.length === 0 || paging() || workspace.loading) return
+    setPaging(true)
+    const parentID =
+      available.length === 1
+        ? available[0].session.id
+        : await props.context.ui.dialog.select({
+            title: "Load older Delegation history",
+            current: selectedParent(),
+            options: available.map((parent) => ({
+              title: parent.session.title ?? parent.session.id,
+              value: parent.session.id,
+              description: `${parent.operations.length} loaded / ${parent.counts.total} retained`,
+            })),
+          })
+    const parent = available.find((candidate) => candidate.session.id === parentID)
+    if (!parent?.nextCursor) {
+      setPaging(false)
+      return
+    }
+    const failed = paginationFailure()
+    const cursor =
+      failed?.parentID === parent.session.id && failed.cursor === parent.nextCursor ? failed.cursor : parent.nextCursor
+    setLoadingParent(parent.session.id)
+    try {
+      const page = await loadSupervisionPage(props.context.client, {
+        generation: result.generation,
+        parentID: parent.session.id,
+        cursor,
+        limit: Math.max(1, parent.operations.length),
+      })
+      setCurrent((value) => (value?.type === "workspace" ? mergeHistoryPage(value, page) : value))
+      setPaginationFailure(undefined)
+    } catch {
+      setPaginationFailure({ parentID: parent.session.id, cursor })
+    } finally {
+      setLoadingParent(undefined)
+      setPaging(false)
+    }
+  }
   const theme = props.context.theme
 
   props.context.keymap.layer(() => ({
@@ -97,12 +172,61 @@ function SupervisionPage(props: { readonly context: Context }) {
           )
         },
       },
+      {
+        id: "delegation.supervision.refresh",
+        title: "Refresh Delegation supervision",
+        bind: "ctrl+r",
+        run() {
+          const result = current()
+          if (result?.type !== "workspace" || paging() || workspace.loading) return
+          setRefreshRequest({
+            generation: result.generation + 1,
+            history: result.parents.map((parent) => ({
+              parentID: parent.session.id,
+              limit: Math.max(1, parent.operations.length),
+              ...(parent.session.id === result.focus?.parentID && result.focus.operationID
+                ? { operationID: result.focus.operationID }
+                : {}),
+            })),
+          })
+        },
+      },
+      {
+        id: "delegation.supervision.filter.search",
+        title: "Search Delegation history",
+        bind: "ctrl+f",
+        async run() {
+          const value = await props.context.ui.dialog.prompt({
+            title: "Search Delegation history",
+            description: "Search tasks, identifiers, and Sessions",
+            value: search(),
+          })
+          if (value !== undefined) setSearch(value)
+        },
+      },
+      {
+        id: "delegation.supervision.history.older",
+        title: "Load older Delegation history",
+        bind: "ctrl+o",
+        run: loadOlder,
+      },
+      {
+        id: "delegation.supervision.filter.actionable",
+        title: "Toggle actionable Delegations",
+        bind: "ctrl+a",
+        run() {
+          setActionableOnly((value) => !value)
+        },
+      },
     ],
   }))
 
   return (
     <box flexDirection="column" padding={1} gap={1}>
       <text fg={theme.text.default}>Delegation supervision</text>
+      <text fg={theme.text.subdued}>
+        Search: {search() || "all"} (Ctrl+F) | {actionableOnly() ? "actionable only" : "all states"} (Ctrl+A)
+      </text>
       <Show when={health()}>
         <text fg={theme.text.feedback.warning.default}>Degraded coordinator data: {health()?.reason}</text>
       </Show>
@@ -120,9 +244,7 @@ function SupervisionPage(props: { readonly context: Context }) {
           <text fg={theme.text.feedback.warning.default}>This Delegation supervision version is not supported.</text>
         </Match>
         <Match when={failed()}>
-          <text fg={theme.text.feedback.error.default}>
-            Delegation supervision is unavailable: {failed()?.code}
-          </text>
+          <text fg={theme.text.feedback.error.default}>Delegation supervision is unavailable: {failed()?.code}</text>
         </Match>
         <Match when={ready()}>
           <For each={ready()?.parents ?? []}>
@@ -138,14 +260,31 @@ function SupervisionPage(props: { readonly context: Context }) {
                     <text fg={theme.text.subdued}>archived</text>
                   </Show>
                 </box>
-                <For each={parent.operations}>
-                  {(operation) => (
-                    <text fg={theme.text.subdued}>
-                      {selectedOperationID() === operation.id ? "  > " : "    "}
-                      {operation.text} [{operation.presentationState}] {timelineTrack(operation, observedAt())}
-                    </text>
+                <For each={parent.batches}>
+                  {(batch) => (
+                    <box flexDirection="column">
+                      <text fg={theme.text.subdued}> Batch {batch.id}</text>
+                      <For each={parent.operations.filter((operation) => operation.batchID === batch.id)}>
+                        {(operation) => (
+                          <text fg={theme.text.subdued}>
+                            {selectedOperationID() === operation.id ? "  > " : "    "}
+                            {operation.text} [{operation.presentationState}] {timelineTrack(operation, observedAt())}
+                          </text>
+                        )}
+                      </For>
+                    </box>
                   )}
                 </For>
+                <Show when={parent.nextCursor}>
+                  <text fg={theme.text.subdued}>
+                    {loadingParent() === parent.session.id
+                      ? "Loading older history..."
+                      : paginationFailure()?.parentID === parent.session.id &&
+                          paginationFailure()?.cursor === parent.nextCursor
+                        ? "Load older history failed. Press Ctrl+O to retry."
+                        : "Load older history (Ctrl+O)"}
+                  </text>
+                </Show>
               </box>
             )}
           </For>
@@ -187,7 +326,9 @@ export function timelineTrack(operation: ProjectedOperation, observedAt: number)
       : duration("Finalizing", timeline.executionEndedAt, timeline.concludedAt ?? observedAt),
     operation.presentationState === "terminal" ? "Terminal" : undefined,
   ].filter((value): value is string => value !== undefined)
-  const overlays = timeline.permissionWaits.map((wait) => duration("Waiting", wait.startedAt, wait.endedAt ?? observedAt))
+  const overlays = timeline.permissionWaits.map((wait) =>
+    duration("Waiting", wait.startedAt, wait.endedAt ?? observedAt),
+  )
   return `${phases.join(" | ")}${overlays.length === 0 ? "" : ` || overlays: ${overlays.join(", ")}`}`
 }
 
@@ -204,7 +345,9 @@ export function operationInspector(operation: ProjectedOperation, observedAt: nu
         ]
       : []),
     ...(operation.outcome
-      ? [`Outcome ${operation.outcome.state}: ${operation.outcome.reason.code}${operation.outcome.reason.detail ? ` - ${operation.outcome.reason.detail}` : ""}`]
+      ? [
+          `Outcome ${operation.outcome.state}: ${operation.outcome.reason.code}${operation.outcome.reason.detail ? ` - ${operation.outcome.reason.detail}` : ""}`,
+        ]
       : []),
     ...(operation.recovery
       ? [

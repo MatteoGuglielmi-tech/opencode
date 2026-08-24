@@ -9,6 +9,8 @@ import { initializeProfile } from "../src/distribution"
 import { open } from "../src/storage"
 import TuiPlugin from "../src/tui"
 import {
+  mergeHistoryPage,
+  reconcileHistoryRefresh,
   loadSupervision,
   projectWorkspace,
   supervisionView,
@@ -142,13 +144,19 @@ describe("Delegation supervision workspace", () => {
       input: {},
     })
     expect(supervisionView(undefined, undefined, { search: "", actionableOnly: false })).toEqual({ type: "loading" })
-    const empty: WorkspaceResult = { type: "workspace", health: { status: "healthy" }, observedAt: 1, parents: [] }
+    const empty: WorkspaceResult = {
+      type: "workspace",
+      generation: 0,
+      health: { status: "healthy" },
+      observedAt: 1,
+      parents: [],
+    }
     expect(supervisionView(empty, undefined, { search: "", actionableOnly: false })).toEqual({
       type: "workspace-empty",
     })
     expect(
       supervisionView(
-        { type: "workspace", health: { status: "healthy" }, observedAt: 1, parents: [parentSummary] },
+        { type: "workspace", generation: 0, health: { status: "healthy" }, observedAt: 1, parents: [parentSummary] },
         undefined,
         { search: "missing", actionableOnly: false },
       ),
@@ -157,8 +165,187 @@ describe("Delegation supervision workspace", () => {
       type: "unsupported-version",
     })
     expect(
-      supervisionView(undefined, { code: "plugin_unavailable", detail: "missing" }, { search: "", actionableOnly: false }),
+      supervisionView(
+        undefined,
+        { code: "plugin_unavailable", detail: "missing" },
+        { search: "", actionableOnly: false },
+      ),
     ).toEqual({ type: "failure", code: "plugin_unavailable", detail: "missing" })
+  })
+
+  test("filters tasks and identifiers without changing canonical operation order", () => {
+    const result: WorkspaceResult = {
+      type: "workspace",
+      generation: 1,
+      health: { status: "healthy" },
+      observedAt: 1,
+      parents: [
+        {
+          ...parentSummary,
+          operations: [
+            operationSummary("dop_first", "compile docs", "completed"),
+            operationSummary("dop_second", "deploy api", "queued"),
+          ],
+        },
+      ],
+    }
+
+    expect(supervisionView(result, undefined, { search: "dop_second", actionableOnly: false })).toMatchObject({
+      type: "ready",
+      parents: [{ operations: [{ id: "dop_second" }] }],
+    })
+    expect(supervisionView(result, undefined, { search: "", actionableOnly: true })).toMatchObject({
+      type: "ready",
+      parents: [{ operations: [{ id: "dop_second" }] }],
+    })
+    expect(
+      (
+        supervisionView(result, undefined, { search: "", actionableOnly: false }) as { parents: typeof result.parents }
+      ).parents[0].operations.map((operation) => operation.id),
+    ).toEqual(["dop_first", "dop_second"])
+  })
+
+  test("appends only a current older page without duplicates or anchor movement", () => {
+    const current: Extract<WorkspaceResult, { type: "workspace" }> = {
+      type: "workspace",
+      generation: 7,
+      health: { status: "healthy" },
+      observedAt: 1,
+      focus: { parentID: "ses_parent", operationID: "dop_first" },
+      parents: [
+        {
+          ...parentSummary,
+          nextCursor: "cursor-1",
+          operations: [operationSummary("dop_first", "first", "queued")],
+        },
+      ],
+    }
+    const page = {
+      type: "history-page" as const,
+      generation: 7,
+      observedAt: 2,
+      parentID: "ses_parent",
+      cursor: "cursor-1",
+      operations: [
+        operationSummary("dop_first", "first changed", "queued"),
+        operationSummary("dop_older", "older", "completed"),
+      ],
+      batches: [],
+    }
+
+    const merged = mergeHistoryPage(current, page)
+    expect(merged.focus).toEqual(current.focus)
+    expect(merged.parents[0].operations.map((operation) => operation.id)).toEqual(["dop_first", "dop_older"])
+    expect(merged.parents[0].operations[0].text).toBe("first changed")
+    expect(mergeHistoryPage(current, { ...page, generation: 6 })).toBe(current)
+    expect(mergeHistoryPage(current, { ...page, cursor: "stale" })).toBe(current)
+  })
+
+  test("pages parents independently and refreshes the expanded loaded depth", async () => {
+    await using fixture = await workspace()
+    const first = await projectWorkspace({
+      store: fixture.store,
+      health: { status: "healthy" },
+      sessions: fixture.sessions,
+      input: {
+        generation: 4,
+        history: [
+          { parentID: "ses_parent", limit: 1 },
+          { parentID: "ses_nested", limit: 1 },
+        ],
+      },
+      observedAt: 50,
+    })
+    if (first.type !== "workspace") throw new Error("expected workspace")
+    const parent = first.parents.find((candidate) => candidate.session.id === "ses_parent")
+    const nested = first.parents.find((candidate) => candidate.session.id === "ses_nested")
+    expect(parent?.operations).toHaveLength(1)
+    expect(nested?.operations).toHaveLength(1)
+    expect(parent?.nextCursor).toBeString()
+
+    const page = await projectWorkspace({
+      store: fixture.store,
+      health: { status: "healthy" },
+      sessions: fixture.sessions,
+      input: {
+        generation: 4,
+        page: { parentID: "ses_parent", cursor: parent!.nextCursor!, limit: 1 },
+      },
+      observedAt: 51,
+    })
+    if (page.type !== "history-page") throw new Error("expected history page")
+    const expanded = mergeHistoryPage(first, page)
+    expect(expanded.parents.find((candidate) => candidate.session.id === "ses_parent")?.operations).toHaveLength(2)
+    expect(expanded.parents.find((candidate) => candidate.session.id === "ses_nested")?.operations).toHaveLength(1)
+
+    await fixture.store.transition(parent!.operations[0].id, ["queued"], "interrupted", {
+      terminalAt: 52,
+      reasonCode: "cancelled_before_start",
+    })
+    await fixture.store.admit(request("ses_parent", ["concurrent newer"], 52))
+    const refreshed = await projectWorkspace({
+      store: fixture.store,
+      health: { status: "healthy" },
+      sessions: fixture.sessions,
+      input: {
+        generation: 5,
+        history: expanded.parents.map((candidate) => ({
+          parentID: candidate.session.id,
+          limit: candidate.operations.length,
+          ...(candidate.session.id === "ses_parent" ? { operationID: parent!.operations[0].id } : {}),
+        })),
+      },
+      observedAt: 53,
+    })
+    if (refreshed.type !== "workspace") throw new Error("expected refreshed workspace")
+    expect(refreshed.parents.find((candidate) => candidate.session.id === "ses_parent")?.operations).toHaveLength(2)
+    expect(
+      refreshed.parents
+        .find((candidate) => candidate.session.id === "ses_parent")
+        ?.operations.find((operation) => operation.id === parent!.operations[0].id)?.presentationState,
+    ).toBe("terminal")
+  })
+
+  test("keeps valid inspection focus and falls back to the nearest surviving operation", () => {
+    const previous: Extract<WorkspaceResult, { type: "workspace" }> = {
+      type: "workspace",
+      generation: 1,
+      health: { status: "healthy" },
+      observedAt: 1,
+      focus: { parentID: "ses_parent", operationID: "dop_second" },
+      parents: [
+        {
+          ...parentSummary,
+          operations: [
+            operationSummary("dop_first", "first", "queued"),
+            operationSummary("dop_second", "second", "queued"),
+            operationSummary("dop_third", "third", "queued"),
+          ],
+        },
+      ],
+    }
+    const next = {
+      ...previous,
+      generation: 2,
+      focus: { parentID: "ses_parent", operationID: "dop_first" },
+      parents: [
+        {
+          ...parentSummary,
+          operations: [
+            operationSummary("dop_first", "first", "queued"),
+            operationSummary("dop_third", "third", "queued"),
+          ],
+        },
+      ],
+    }
+
+    expect(reconcileHistoryRefresh(previous, next).focus).toEqual({
+      parentID: "ses_parent",
+      operationID: "dop_third",
+    })
+    expect(
+      reconcileHistoryRefresh({ ...previous, focus: { parentID: "ses_parent", operationID: "dop_first" } }, next).focus,
+    ).toEqual({ parentID: "ses_parent", operationID: "dop_first" })
   })
 
   test("renders the registered page from the package query without a Session command or coordinator store", async () => {
@@ -230,7 +417,7 @@ describe("Delegation supervision workspace", () => {
         {
           pluginID: "opencode.delegation",
           query: "supervision",
-           version: "2",
+          version: "2",
           input: {},
         },
       ])
@@ -289,12 +476,7 @@ function request(parentID: string, operations: string[], admittedAt: number) {
   }
 }
 
-function session(
-  id: string,
-  title: string,
-  updated: number,
-  options: { parentID?: string; archived?: boolean } = {},
-) {
+function session(id: string, title: string, updated: number, options: { parentID?: string; archived?: boolean } = {}) {
   return {
     id,
     title,
@@ -352,4 +534,22 @@ const parentSummary = {
   newestOperationID: "dop_one",
   batches: [],
   operations: [],
+}
+
+function operationSummary(id: string, text: string, state: "queued" | "completed") {
+  return {
+    id,
+    batchID: "dlg_batch",
+    parentID: "ses_parent",
+    index: id === "dop_first" ? 0 : 1,
+    text,
+    internalState: state,
+    presentationState: state === "queued" ? ("queued" as const) : ("terminal" as const),
+    agent: "general",
+    model: { providerID: "openai", modelID: "gpt-5" },
+    timeline: { admittedAt: 1, permissionWaits: [] },
+    ...(state === "completed"
+      ? { outcome: { state: "completed" as const, reason: { code: "completed" as const } } }
+      : {}),
+  }
 }
