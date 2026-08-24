@@ -439,6 +439,8 @@ export interface UI {
     register(page: Page): () => void
     navigate(destination: Destination): void
     current(): Route
+    /** Returns whether a plugin page is currently registered. */
+    exists(id: string, name: string): boolean
   }
   readonly tabs: {
     /** Returns whether session tabs are enabled for this TUI. */

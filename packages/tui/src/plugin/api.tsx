@@ -46,6 +46,7 @@ export type Registry = {
   set(kind: "markdown", name: string, render: MarkdownCodeBlockRenderer): void
   remove(kind: "routes" | "slots" | "markdown", name: string): void
   active(): boolean
+  route(id: string, name: string): boolean
 }
 
 // The host services a plugin context adapts. Collected once by the provider
@@ -169,6 +170,9 @@ export function createPluginContext(input: {
         },
         current() {
           return host.route.data
+        },
+        exists(id, name) {
+          return input.registry.route(id, name)
         },
       },
       tabs: {

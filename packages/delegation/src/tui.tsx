@@ -12,6 +12,13 @@ import {
   supervisionView,
   type WorkspaceResult,
 } from "./supervision.js"
+import {
+  locationIdentity,
+  reconcilePresentationState,
+  sanitizePresentationState,
+  type PresentationMemory,
+  type PresentationState,
+} from "./presentation.js"
 
 const PAGE = "supervision"
 const ID = "opencode.delegation"
@@ -29,16 +36,30 @@ export function openSupervision(route: Route): Destination | undefined {
   }
 }
 
-export function returnFromSupervision(route: Route, sessionExists: (sessionID: string) => boolean): Route {
+export function returnFromSupervision(
+  route: Route,
+  sessionExists: (sessionID: string) => boolean,
+  pluginExists: (id: string, name: string) => boolean = () => true,
+): Route {
   if (route.type !== "plugin" || route.id !== ID || route.name !== PAGE) return { type: "home" }
   const target = routeValue(route.data?.returnRoute)
   if (!target) return { type: "home" }
   if (target.type === "session" && !sessionExists(target.sessionID)) return { type: "home" }
+  if (target.type === "plugin" && !pluginExists(target.id, target.name)) return { type: "home" }
   if (target.type === "plugin" && target.id === ID && target.name === PAGE) return { type: "home" }
   return target
 }
 
-function SupervisionPage(props: { readonly context: Context }) {
+export function openChildSession(context: Context, childID: string) {
+  context.ui.tabs.open(context.data.session.root(childID))
+  context.ui.router.navigate({ type: "session", sessionID: childID })
+}
+
+function SupervisionPage(props: {
+  readonly context: Context
+  readonly memory: PresentationMemory
+  readonly updateMemory: (mutation: (draft: PresentationMemory) => void) => void
+}) {
   const entry = () => {
     const route = props.context.ui.router.current()
     if (route.type !== "plugin" || route.id !== ID || route.name !== PAGE) return
@@ -58,8 +79,16 @@ function SupervisionPage(props: { readonly context: Context }) {
     () => ({ entrySessionID: entry(), refresh: refreshRequest() }),
     (input) => loadSupervision(props.context.client, input.entrySessionID, input.refresh),
   )
-  const [search, setSearch] = createSignal("")
-  const [actionableOnly, setActionableOnly] = createSignal(false)
+  const location = props.context.location ?? props.context.data.location.default()
+  const memoryKey = locationIdentity(location)
+  const restored = sanitizePresentationState(props.memory.locations[memoryKey], props.context.renderer.terminalWidth)
+  const [search, setSearch] = createSignal(restored.filters.search)
+  const [actionableOnly, setActionableOnly] = createSignal(restored.filters.actionableOnly)
+  const [selectedParentID, setSelectedParentID] = createSignal(restored.selectedParentID)
+  const [selectedOperationID, setSelectedOperationID] = createSignal(restored.selectedOperationID)
+  let presentation = restored
+  let adjustmentReported = false
+  let pendingEntry = entry()
   const [paginationFailure, setPaginationFailure] = createSignal<{
     readonly parentID: string
     readonly cursor: string
@@ -91,27 +120,46 @@ function SupervisionPage(props: { readonly context: Context }) {
   const selectedParent = createMemo(() => {
     const visible = ready()?.parents
     if (!visible) return
-    const result = current()
-    return (
-      visible.find(
-        (parent) => parent.session.id === (result?.type === "workspace" ? result.focus?.parentID : undefined),
-      )?.session.id ?? visible[0]?.session.id
-    )
+    return visible.find((parent) => parent.session.id === selectedParentID())?.session.id ?? visible[0]?.session.id
   })
   const selectedOperation = createMemo(() => {
     const parent = ready()?.parents.find((candidate) => candidate.session.id === selectedParent())
-    const result = current()
-    const operationID = result?.type === "workspace" ? result.focus?.operationID : undefined
-    return parent?.operations.find((operation) => operation.id === operationID) ?? parent?.operations[0]
+    return parent?.operations.find((operation) => operation.id === selectedOperationID()) ?? parent?.operations[0]
   })
   const observedAt = createMemo(() => {
     const result = current()
     return result?.type === "workspace" ? result.observedAt : 0
   })
-  const selectedOperationID = createMemo(() => selectedOperation()?.id)
+  const selectedOperationKey = createMemo(() => selectedOperation()?.id)
   const health = createMemo(() => {
     const result = current()
     if (result?.type === "workspace" && result.health.status === "degraded") return result.health
+  })
+  createEffect(() => {
+    const result = current()
+    if (result?.type !== "workspace") return
+    const input: PresentationState = {
+      ...presentation,
+      filters: { search: search(), actionableOnly: actionableOnly() },
+      selectedParentID: selectedParentID(),
+      selectedOperationID: selectedOperationID(),
+    }
+    const reconciled = reconcilePresentationState(input, result.parents, pendingEntry)
+    pendingEntry = undefined
+    presentation = reconciled.state
+    setSearch(reconciled.state.filters.search)
+    setActionableOnly(reconciled.state.filters.actionableOnly)
+    setSelectedParentID(reconciled.state.selectedParentID)
+    setSelectedOperationID(reconciled.state.selectedOperationID)
+    props.updateMemory((draft) => {
+      draft.locations[memoryKey] = reconciled.state
+    })
+    if (adjustmentReported || reconciled.adjustedFilters.length === 0) return
+    adjustmentReported = true
+    props.context.ui.toast.show({
+      variant: "info",
+      message: `Adjusted ${reconciled.adjustedFilters.join(" and ")} filters to show this Session.`,
+    })
   })
   const loadOlder = async () => {
     const result = current()
@@ -166,10 +214,21 @@ function SupervisionPage(props: { readonly context: Context }) {
         bind: "esc",
         run() {
           props.context.ui.router.navigate(
-            returnFromSupervision(props.context.ui.router.current(), (sessionID) =>
-              Boolean(props.context.data.session.get(sessionID)),
+            returnFromSupervision(
+              props.context.ui.router.current(),
+              (sessionID) => Boolean(props.context.data.session.get(sessionID)),
+              props.context.ui.router.exists,
             ),
           )
+        },
+      },
+      {
+        id: "delegation.supervision.child.open",
+        title: "Open child Session",
+        bind: "enter",
+        run() {
+          const childID = selectedOperation()?.childID
+          if (childID) openChildSession(props.context, childID)
         },
       },
       {
@@ -267,7 +326,7 @@ function SupervisionPage(props: { readonly context: Context }) {
                       <For each={parent.operations.filter((operation) => operation.batchID === batch.id)}>
                         {(operation) => (
                           <text fg={theme.text.subdued}>
-                            {selectedOperationID() === operation.id ? "  > " : "    "}
+                            {selectedOperationKey() === operation.id ? "  > " : "    "}
                             {operation.text} [{operation.presentationState}] {timelineTrack(operation, observedAt())}
                           </text>
                         )}
@@ -385,9 +444,12 @@ function routeValue(value: unknown): Route | undefined {
 export default Plugin.define({
   id: ID,
   setup(context) {
+    const [memory, updateMemory] = context.storage.memory<PresentationMemory>("supervision", {
+      initial: { locations: {} },
+    })
     context.ui.router.register({
       name: PAGE,
-      render: () => <SupervisionPage context={context} />,
+      render: () => <SupervisionPage context={context} memory={memory} updateMemory={updateMemory} />,
     })
     context.keymap.layer(() => ({
       mode: "global",

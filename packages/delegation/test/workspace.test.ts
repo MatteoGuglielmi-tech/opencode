@@ -358,7 +358,12 @@ describe("Delegation supervision workspace", () => {
     let page: Page | undefined
     let route: Route = { type: "home" }
     const calls: unknown[] = []
+    const memory = { locations: {} }
+    const layers: KeymapLayer[] = []
     const context = {
+      location: { directory: "/repo" },
+      renderer: { terminalWidth: 80 },
+      storage: { memory: () => [memory, (update: (draft: typeof memory) => void) => update(memory)] },
       client: {
         plugin: {
           query: {
@@ -380,7 +385,10 @@ describe("Delegation supervision workspace", () => {
           },
         },
       },
-      data: { session: { get: () => undefined } },
+      data: {
+        session: { get: () => undefined },
+        location: { default: () => ({ directory: "/repo" }) },
+      },
       theme: {
         text: {
           default: "#ffffff",
@@ -388,15 +396,18 @@ describe("Delegation supervision workspace", () => {
           feedback: { warning: { default: "#ffff00" }, error: { default: "#ff0000" } },
         },
       },
-      keymap: { layer: (_input: () => KeymapLayer) => {} },
+      keymap: { layer: (input: () => KeymapLayer) => layers.push(input()) },
       ui: {
-        dialog: { clear() {} },
+        dialog: { clear() {}, prompt: async () => "nested" },
+        toast: { show() {} },
+        tabs: { open: () => false },
         router: {
           register: (input: Page) => {
             page = input
             return () => {}
           },
           current: () => route,
+          exists: () => true,
           navigate: (input: Route) => {
             route = input
           },
@@ -421,8 +432,29 @@ describe("Delegation supervision workspace", () => {
           input: {},
         },
       ])
+      const search = layers
+        .flatMap((layer) => layer.commands ?? [])
+        .find((command) => command.id === "delegation.supervision.filter.search")
+      await search?.run()
+      await app.waitForFrame((frame) => frame.includes("Search: nested"))
     } finally {
       app.renderer.destroy()
+    }
+
+    void TuiPlugin.setup(context)
+    if (!page) throw new Error("expected reloaded supervision page")
+    const reloaded = page
+    const restored = await testRender(
+      () => reloaded.render({ data: route.type === "plugin" ? route.data : undefined }),
+      {
+        width: 80,
+        height: 20,
+      },
+    )
+    try {
+      await restored.waitForFrame((frame) => frame.includes("Search: nested"))
+    } finally {
+      restored.renderer.destroy()
     }
   })
 })

@@ -136,6 +136,8 @@ export function PluginProvider(props: ParentProps<{ packages: PackageResolver; d
             }),
           ),
         active: () => Boolean(store.registrations[id]?.active),
+        route: (pluginID, name) =>
+          Boolean(store.registrations[pluginID]?.active && store.registrations[pluginID]?.routes[name]),
       },
     })
     const cleanup = await setup(item.plugin, context, owned).catch((error) => {
