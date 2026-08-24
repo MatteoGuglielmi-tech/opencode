@@ -413,9 +413,12 @@
         "opencode-delegation": "./bin/opencode-delegation",
       },
       "dependencies": {
+        "@opencode-ai/client": "workspace:*",
         "@opencode-ai/plugin": "workspace:*",
         "@opencode-ai/schema": "workspace:*",
+        "@opentui/solid": "catalog:",
         "effect": "catalog:",
+        "solid-js": "catalog:",
       },
       "devDependencies": {
         "@tsconfig/bun": "catalog:",

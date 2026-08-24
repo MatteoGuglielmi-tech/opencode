@@ -45,7 +45,7 @@ export interface CreateChildInput {
 }
 
 export interface SessionDomain
-  extends Pick<SessionApi, "create" | "get" | "prompt" | "generate" | "command" | "synthetic" | "interrupt"> {
+  extends Pick<SessionApi, "list" | "create" | "get" | "prompt" | "generate" | "command" | "synthetic" | "interrupt"> {
   readonly createChild: (input: CreateChildInput) => ReturnType<SessionApi["create"]>
   readonly messages: (input: {
     readonly sessionID: string

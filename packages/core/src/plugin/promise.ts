@@ -286,6 +286,7 @@ export function fromPromise(plugin: PluginDefinition) {
               ),
           },
           session: {
+            list: () => run(host.session.list()),
             hook: (name, callback) =>
               register(host.session.hook(name, (event) => Effect.promise(() => Promise.resolve(callback(event))))),
             create: (input) =>

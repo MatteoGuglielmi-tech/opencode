@@ -353,6 +353,10 @@ export const make = Effect.fn("PluginHost.make")(function* (
         }),
     },
     session: {
+      list: () =>
+        runtime.session
+          .list({ directory: location.directory, workspaceID: location.workspaceID })
+          .pipe(Effect.map((result) => ({ ...result, cursor: {} }))),
       hook: (name, callback) => hooks.register("session", name, callback),
       create: (input) =>
         runtime.session.create({

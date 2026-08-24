@@ -18,6 +18,7 @@ import { Session } from "@opencode-ai/core/session"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionInbox } from "@opencode-ai/core/session/inbox"
 import { SessionTable } from "@opencode-ai/core/session/sql"
+import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Tool } from "@opencode-ai/core/tool"
 import { Workspace } from "@opencode-ai/core/workspace"
 import { testEffect } from "./lib/effect"
@@ -31,6 +32,25 @@ class Secret extends Context.Service<Secret, string>()("@opencode/test/PluginSec
 const versioned = <R>(plugin: EffectPlugin.Plugin<R>, version = "1") => ({ ...plugin, version })
 
 describe("Plugin", () => {
+  it.effect("lists only sessions in the plugin activation Location", () =>
+    Effect.gen(function* () {
+      const plugins = yield* Plugin.Service
+      const runtime = yield* PluginRuntime.Service
+      const sessions = yield* Session.Service
+      const location = yield* Location.Service
+      const host = yield* PluginHost.make(plugins).pipe(
+        Effect.provideService(PluginRuntime.Service, PluginRuntime.Service.of({ ...runtime, session: sessions })),
+      )
+      const current = yield* sessions.create({ location: Location.Ref.make({ directory: location.directory }) })
+      const nested = yield* sessions.create({ parentID: current.id })
+      yield* sessions.create({ location: Location.Ref.make({ directory: AbsolutePath.make("/other") }) })
+
+      expect((yield* host.session.list()).data.map((session) => session.id).toSorted()).toEqual(
+        [current.id, nested.id].toSorted(),
+      )
+    }),
+  )
+
   it.effect("resumes execution and cancels pending inbox work through the Effect plugin boundary", () =>
     Effect.gen(function* () {
       const plugins = yield* Plugin.Service

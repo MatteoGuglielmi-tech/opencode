@@ -1,12 +1,13 @@
 import { Plugin } from "@opencode-ai/plugin/effect"
 import { Agent, Model, Provider, Session, SessionMessage } from "@opencode-ai/schema"
-import { Effect, Stream } from "effect"
+import { DateTime, Effect, Stream } from "effect"
 import { DelegationAdmission } from "./admission.js"
 import { decode } from "./config.js"
 import { DelegationControl } from "./control.js"
 import { acquire, degrade, supervise, type Lease } from "./runtime.js"
 import { isStorageFailure, storageFailureCause } from "./storage.js"
 import { DefinitePromptError, Supervisor } from "./supervisor.js"
+import { workspaceQuery } from "./supervision.js"
 
 export default Plugin.define({
   id: "opencode.delegation",
@@ -231,6 +232,25 @@ export default Plugin.define({
           ),
         ),
       )
+    yield* context.plugin.query.register(
+      "supervision",
+      workspaceQuery({
+        store: "runtime" in lease ? lease.runtime.store : lease.store,
+        health: () => lease.health,
+        sessions: () =>
+          context.session.list().pipe(
+            Effect.map((sessions) =>
+              sessions.data.map((session) => ({
+                id: session.id,
+                ...(session.title === undefined ? {} : { title: session.title }),
+                ...(session.parentID === undefined ? {} : { parentID: session.parentID }),
+                archived: session.time.archived !== undefined,
+                updated: DateTime.toEpochMillis(session.time.updated),
+              })),
+            ),
+          ),
+      }),
+    )
     yield* context.command.register("delegate", (input) => {
       if (!("runtime" in lease) || lease.runtime.health.status === "degraded") {
         const health = "runtime" in lease ? lease.runtime.health : lease.health

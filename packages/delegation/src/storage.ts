@@ -108,6 +108,14 @@ export interface DelegationSnapshot {
   readonly nextCursor?: string
 }
 
+export interface WorkspaceSnapshot {
+  readonly parents: ReadonlyArray<{
+    readonly parentID: string
+    readonly operations: ReadonlyArray<OperationRecord>
+    readonly delivery: DelegationSnapshot["delivery"]
+  }>
+}
+
 export type DeliveryKind = "admission" | "terminal" | "recovery" | "control"
 export type DeliveryState = "acknowledged" | "pending" | "conflicted"
 
@@ -264,6 +272,7 @@ export interface Store {
   readonly operationByChild: (childID: string) => Promise<OperationRecord | undefined>
   readonly operationsByBatch: (batchID: string) => Promise<ReadonlyArray<OperationRecord>>
   readonly activeByParent: (parentID: string) => Promise<ReadonlyArray<OperationRecord>>
+  readonly workspace: () => Promise<WorkspaceSnapshot>
   readonly snapshot: (query: SnapshotQuery) => Promise<DelegationSnapshot>
   readonly requestCancellation: (
     operationID: string,
@@ -747,6 +756,19 @@ export async function open(options: Options): Promise<Store> {
         .all(parentID)
         .map(operationRecord)
     },
+    async workspace() {
+      if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
+      return database.transaction(() => ({
+        parents: database
+          .query<{ parent_id: string }, []>("SELECT DISTINCT parent_id FROM delegation_batch ORDER BY parent_id")
+          .all()
+          .map((row) => ({
+            parentID: row.parent_id,
+            operations: loadParentOperations(database, row.parent_id),
+            delivery: deliverySummary(database, row.parent_id),
+          })),
+      }))()
+    },
     async snapshot(input) {
       if (closed) throw new StorageError("store_closed", "Delegation coordinator store is closed")
       const limit = input.limit ?? 50
@@ -888,6 +910,7 @@ function safeStore(store: Store): Store {
     operationByChild: safeMethod(store.operationByChild),
     operationsByBatch: safeMethod(store.operationsByBatch),
     activeByParent: safeMethod(store.activeByParent),
+    workspace: safeMethod(store.workspace),
     snapshot: safeMethod(store.snapshot),
     requestCancellation: safeMethod(store.requestCancellation),
     removeParent: safeMethod(store.removeParent),
@@ -1522,6 +1545,20 @@ function loadOperation(database: Database, field: "o.id" | "o.child_id", value: 
     )
     .get(value)
   return row ? operationRecord(row) : undefined
+}
+
+function loadParentOperations(database: Database, parentID: string) {
+  return database
+    .query<OperationRow, [string]>(
+      `SELECT o.*, b.parent_id, b.agent_id, b.provider_id, b.model_id, b.variant, b.shared_context, b.admitted_at,
+              b.files, b.agents, b.skills
+       FROM delegation_operation o
+       JOIN delegation_batch b ON b.id = o.batch_id
+       WHERE b.parent_id = ?
+       ORDER BY b.admission_sequence, o.operation_index`,
+    )
+    .all(parentID)
+    .map(operationRecord)
 }
 
 function terminal(state: OperationState) {

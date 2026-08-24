@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/plugin.ts",
+    "./tui": "./src/tui.tsx",
     "./config": "./src/config.ts",
     "./distribution": "./src/distribution.ts",
     "./runtime": "./src/runtime.ts",
@@ -19,9 +20,12 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
+    "@opencode-ai/client": "workspace:*",
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/schema": "workspace:*",
-    "effect": "catalog:"
+    "@opentui/solid": "catalog:",
+    "effect": "catalog:",
+    "solid-js": "catalog:"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
