@@ -16,6 +16,7 @@
     "opencode-delegation": "./bin/opencode-delegation"
   },
   "scripts": {
+    "acceptance": "bun run script/acceptance.ts",
     "test": "bun test",
     "typecheck": "tsgo --noEmit"
   },

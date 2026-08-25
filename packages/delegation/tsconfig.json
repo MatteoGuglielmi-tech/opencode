@@ -4,5 +4,5 @@
   "compilerOptions": {
     "noUncheckedIndexedAccess": false
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "script"]
 }

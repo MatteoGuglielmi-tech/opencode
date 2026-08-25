@@ -138,6 +138,9 @@ describe("Delegation supervision workspace", () => {
     const output = await Effect.runPromise(definition.execute({}))
     const query = client(output)
     expect(await loadSupervision(query.client, undefined)).toEqual(output)
+    await expect(loadSupervision(client(output, "1").client, undefined)).rejects.toThrow(
+      "Unsupported Delegation supervision version: 1",
+    )
     expect(query.input).toEqual({
       pluginID: "opencode.delegation",
       query: "supervision",
@@ -717,7 +720,7 @@ function session(id: string, title: string, updated: number, options: { parentID
   }
 }
 
-function client(output: WorkspaceResult) {
+function client(output: WorkspaceResult, version = "2") {
   let input: unknown
   return {
     get input() {
@@ -733,7 +736,7 @@ function client(output: WorkspaceResult) {
                 directory: "/repo",
                 project: { id: "project", directory: "/repo", canonical: "/repo" },
               },
-              data: { version: "2", output },
+              data: { version, output },
             }
           },
         },

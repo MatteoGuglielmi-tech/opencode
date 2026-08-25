@@ -342,7 +342,7 @@ export async function loadSupervision(
       readonly query: {
         readonly invoke: (
           input: Parameters<OpenCodeClient["plugin"]["query"]["invoke"]>[0],
-        ) => Promise<{ readonly data: { readonly output: unknown } }>
+        ) => Promise<{ readonly data: { readonly version: string; readonly output: unknown } }>
       }
     }
   },
@@ -374,6 +374,7 @@ export async function loadSupervision(
         : {}),
     },
   })
+  if (response.data.version !== VERSION) throw new Error(`Unsupported Delegation supervision version: ${response.data.version}`)
   return Schema.decodeUnknownSync(WorkspaceResult)(response.data.output)
 }
 
@@ -390,6 +391,7 @@ export async function loadSupervisionPage(
       page: { parentID: input.parentID, cursor: input.cursor, limit: input.limit },
     },
   })
+  if (response.data.version !== VERSION) throw new Error(`Unsupported Delegation supervision version: ${response.data.version}`)
   const result = Schema.decodeUnknownSync(WorkspaceResult)(response.data.output)
   if (result.type !== "history-page") throw new Error("Delegation history response is not a page")
   return result

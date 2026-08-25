@@ -48,8 +48,8 @@ it.live("invokes authenticated Location-scoped plugin queries without Session hi
               fs: { filewatcher: true },
             })
             const baseUrl = HttpServer.formatAddress(server.address)
-            const endpoint = (pluginID: string, directory: string) =>
-              `${baseUrl}/api/plugin/${pluginID}/query/status?location%5Bdirectory%5D=${encodeURIComponent(directory)}`
+            const endpoint = (pluginID: string, directory: string, query = "status") =>
+              `${baseUrl}/api/plugin/${pluginID}/query/${query}?location%5Bdirectory%5D=${encodeURIComponent(directory)}`
 
             expect(
               (
@@ -138,6 +138,11 @@ it.live("invokes authenticated Location-scoped plugin queries without Session hi
               _tag: "PluginQueryInvalidRequestError",
               kind: "invalid_request",
             })
+
+            const invalidOutput = yield* Effect.promise(() =>
+              fetch(endpoint("effect-query", first, "invalid-output"), request({ version: "1", input: {} })),
+            )
+            expect(invalidOutput.status).toBe(500)
 
             const unavailable = yield* Effect.promise(() =>
               fetch(endpoint("effect-query", first), request({ version: "2", input: { value: 1 } })),
