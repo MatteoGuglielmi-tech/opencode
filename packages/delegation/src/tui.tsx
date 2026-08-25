@@ -2,6 +2,7 @@
 import { Plugin } from "@opencode-ai/plugin/tui"
 import type { Context, Destination, Route } from "@opencode-ai/plugin/tui/context"
 import { isPermissionNotFoundError, type PermissionReply, type PermissionRequest } from "@opencode-ai/client"
+import { useTerminalDimensions } from "@opentui/solid"
 import { randomUUID } from "node:crypto"
 import { batch, createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import {
@@ -41,6 +42,7 @@ import {
   type PermissionControlResult,
   type PendingPermissionControl,
 } from "./permission-controls.js"
+import { layoutFor, resizeLayout, type Separator } from "./responsive.js"
 
 const PAGE = "supervision"
 const ID = "opencode.delegation"
@@ -94,7 +96,8 @@ function SupervisionPage(props: {
   const [permissions, setPermissions] = createSignal<ReadonlyMap<string, ReadonlyArray<PermissionRequest>>>(new Map())
   const location = props.context.location ?? props.context.data.location.default()
   const memoryKey = locationIdentity(location)
-  const restored = sanitizePresentationState(props.memory.locations[memoryKey], props.context.renderer.terminalWidth)
+  const dimensions = useTerminalDimensions()
+  const restored = sanitizePresentationState(props.memory.locations[memoryKey], dimensions().width)
   const [search, setSearch] = createSignal(restored.filters.search)
   const [actionableOnly, setActionableOnly] = createSignal(restored.filters.actionableOnly)
   const [selectedParentID, setSelectedParentID] = createSignal(restored.selectedParentID)
@@ -112,6 +115,25 @@ function SupervisionPage(props: {
   const [pendingPermissions, setPendingPermissions] = createSignal<ReadonlyArray<PendingPermissionControl>>([])
   const [steerDrafts, setSteerDrafts] = createSignal<Readonly<Record<string, string>>>({})
   const [confirmedGeneration, setConfirmedGeneration] = createSignal(0)
+  const [wideParents, setWideParents] = createSignal(restored.paneSizes.wide.parents)
+  const [wideInspector, setWideInspector] = createSignal(restored.paneSizes.wide.inspector)
+  const [mediumInspector, setMediumInspector] = createSignal(restored.paneSizes.medium.inspector)
+  const [stage, setStage] = createSignal<"parents" | "timeline" | "inspector">("parents")
+  const [focus, setFocus] = createSignal<
+    "parents" | "parentSelector" | "parentSeparator" | "timeline" | "timelineSeparator" | "inspector"
+  >("parents")
+  const layout = createMemo(() =>
+    layoutFor(
+      dimensions().width,
+      dimensions().width >= 120
+        ? { parents: wideParents(), inspector: wideInspector() }
+        : { inspector: mediumInspector() },
+    ),
+  )
+  let timelineScroll: { scrollBy(offset: number): void } | undefined
+  let inspectorScroll: { scrollBy(offset: number): void } | undefined
+  let dragX: number | undefined
+  let dragging: Separator | undefined
   const synchronization = createSupervisionSynchronization<PermissionRequest>({
     load: (request) => loadSupervision(props.context.client, entry(), request),
     permissions: async (childIDs) => {
@@ -618,6 +640,124 @@ function SupervisionPage(props: {
       candidate.id,
     )
   }
+  const selectedParentRecord = createMemo(() =>
+    ready()?.parents.find((candidate) => candidate.session.id === selectedParent()),
+  )
+  const focusOrder = () => {
+    if (layout().composition === "wide")
+      return ["parents", "parentSeparator", "timeline", "timelineSeparator", "inspector"] as const
+    if (layout().composition === "medium")
+      return ["parentSelector", "timeline", "timelineSeparator", "inspector"] as const
+    return [stage()] as const
+  }
+  createEffect(() => {
+    const order = focusOrder()
+    if (!order.includes(focus() as never)) setFocus(order[0])
+  })
+  const rememberLayout = (separator: Separator, delta: number) => {
+    const next = resizeLayout(layout(), separator, delta)
+    if (next.composition === "wide") {
+      setWideParents(next.parents)
+      setWideInspector(next.inspector)
+    }
+    if (next.composition === "medium") setMediumInspector(next.inspector)
+    const paneSizes = {
+      ...presentation.paneSizes,
+      ...(next.composition === "wide"
+        ? { wide: { parents: next.parents, inspector: next.inspector } }
+        : next.composition === "medium"
+          ? { medium: { inspector: next.inspector } }
+          : {}),
+    }
+    presentation = { ...presentation, paneSizes }
+    props.updateMemory((draft) => {
+      const current = draft.locations[memoryKey] ?? presentation
+      draft.locations[memoryKey] = { ...current, paneSizes }
+    })
+  }
+  const moveFocus = (delta: number) => {
+    const order = focusOrder()
+    const index = Math.max(0, order.indexOf(focus() as never))
+    setFocus(order[(index + delta + order.length) % order.length])
+  }
+  const selectParent = (parentID: string, advance = false) => {
+    setSelectedParentID(parentID)
+    const parent = ready()?.parents.find((candidate) => candidate.session.id === parentID)
+    if (parent && !parent.operations.some((operation) => operation.id === selectedOperationID()))
+      setSelectedOperationID(parent.operations[0]?.id)
+    if (advance && layout().composition === "narrow") {
+      setFocus("timeline")
+      setStage("timeline")
+    }
+  }
+  const selectOperation = (operationID: string, advance = false) => {
+    setSelectedOperationID(operationID)
+    setFocus("timeline")
+    if (advance && layout().composition === "narrow") setStage("inspector")
+  }
+  const moveSelection = (delta: number) => {
+    if (
+      focus() === "parents" ||
+      focus() === "parentSelector" ||
+      (layout().composition === "narrow" && stage() === "parents")
+    ) {
+      const parents = ready()?.parents ?? []
+      const index = Math.max(0, parents.findIndex((parent) => parent.session.id === selectedParent()))
+      const next = parents[index + delta]
+      if (next) selectParent(next.session.id)
+      return
+    }
+    if (focus() === "timeline" || (layout().composition === "narrow" && stage() === "timeline")) {
+      const operations = selectedParentRecord()?.operations ?? []
+      const index = Math.max(0, operations.findIndex((operation) => operation.id === selectedOperationKey()))
+      const next = operations[index + delta]
+      if (next) {
+        selectOperation(next.id)
+        timelineScroll?.scrollBy(delta * 2)
+      }
+      return
+    }
+    inspectorScroll?.scrollBy(delta)
+  }
+  const forward = () => {
+    if (layout().composition === "narrow") {
+      if (stage() === "parents") return setStage("timeline")
+      if (stage() === "timeline") return setStage("inspector")
+    }
+    const childID = selectedOperation()?.childID
+    if (childID) openChildSession(props.context, childID)
+  }
+  const back = () => {
+    if (layout().composition === "narrow" && stage() === "inspector") return setStage("timeline")
+    if (layout().composition === "narrow" && stage() === "timeline") return setStage("parents")
+    props.context.ui.router.navigate(
+      returnFromSupervision(
+        props.context.ui.router.current(),
+        (sessionID) => Boolean(props.context.data.session.get(sessionID)),
+        props.context.ui.router.exists,
+      ),
+    )
+  }
+  const selectParentDialog = async () => {
+    const parentID = await props.context.ui.dialog.select({
+      title: "Select parent Session",
+      current: selectedParent(),
+      options: (ready()?.parents ?? []).map((parent) => ({
+        title: parent.session.title ?? parent.session.id,
+        value: parent.session.id,
+        description: `${parent.counts.actionable} actionable / ${parent.counts.total} retained`,
+      })),
+    })
+    if (parentID) selectParent(parentID)
+  }
+  const searchHistory = async () => {
+    const value = await props.context.ui.dialog.prompt({
+      title: "Search Delegation history",
+      description: "Search Delegation operations, identifiers, and Sessions",
+      value: search(),
+    })
+    if (value !== undefined) setSearch(value)
+  }
   const theme = props.context.theme
 
   props.context.keymap.layer(() => ({
@@ -626,24 +766,13 @@ function SupervisionPage(props: {
         id: "delegation.supervision.back",
         title: "Back from Delegation supervision",
         bind: "esc",
-        run() {
-          props.context.ui.router.navigate(
-            returnFromSupervision(
-              props.context.ui.router.current(),
-              (sessionID) => Boolean(props.context.data.session.get(sessionID)),
-              props.context.ui.router.exists,
-            ),
-          )
-        },
+        run: back,
       },
       {
         id: "delegation.supervision.child.open",
-        title: "Open child Session",
+        title: "Inspect or open child Session",
         bind: "enter",
-        run() {
-          const childID = selectedOperation()?.childID
-          if (childID) openChildSession(props.context, childID)
-        },
+        run: forward,
       },
       {
         id: "delegation.supervision.refresh",
@@ -743,14 +872,7 @@ function SupervisionPage(props: {
         id: "delegation.supervision.filter.search",
         title: "Search Delegation history",
         bind: "ctrl+f",
-        async run() {
-          const value = await props.context.ui.dialog.prompt({
-            title: "Search Delegation history",
-            description: "Search tasks, identifiers, and Sessions",
-            value: search(),
-          })
-          if (value !== undefined) setSearch(value)
-        },
+        run: searchHistory,
       },
       {
         id: "delegation.supervision.history.older",
@@ -766,19 +888,343 @@ function SupervisionPage(props: {
           setActionableOnly((value) => !value)
         },
       },
+      {
+        id: "delegation.supervision.navigation.previous",
+        title: "Previous Delegation item",
+        bind: "up",
+        run: () => moveSelection(-1),
+      },
+      {
+        id: "delegation.supervision.navigation.next",
+        title: "Next Delegation item",
+        bind: "down",
+        run: () => moveSelection(1),
+      },
+      {
+        id: "delegation.supervision.focus.previous",
+        title: "Previous Delegation pane",
+        bind: "shift+tab",
+        run: () => moveFocus(-1),
+      },
+      {
+        id: "delegation.supervision.focus.next",
+        title: "Next Delegation pane",
+        bind: "tab",
+        run: () => moveFocus(1),
+      },
+      {
+        id: "delegation.supervision.navigation.left",
+        title: "Move or resize left",
+        bind: "left",
+        run() {
+          if (focus() === "parentSeparator") return rememberLayout("parents", -2)
+          if (focus() === "timelineSeparator") return rememberLayout("inspector", 2)
+          moveFocus(-1)
+        },
+      },
+      {
+        id: "delegation.supervision.navigation.right",
+        title: "Move or resize right",
+        bind: "right",
+        run() {
+          if (focus() === "parentSeparator") return rememberLayout("parents", 2)
+          if (focus() === "timelineSeparator") return rememberLayout("inspector", -2)
+          moveFocus(1)
+        },
+      },
+      {
+        id: "delegation.supervision.scroll.page-up",
+        title: "Scroll Delegation pane up",
+        bind: "pgup",
+        run: () => (focus() === "inspector" ? inspectorScroll : timelineScroll)?.scrollBy(-8),
+      },
+      {
+        id: "delegation.supervision.scroll.page-down",
+        title: "Scroll Delegation pane down",
+        bind: "pgdown",
+        run: () => (focus() === "inspector" ? inspectorScroll : timelineScroll)?.scrollBy(8),
+      },
     ],
   }))
 
+  function ParentPane() {
+    return (
+      <box width={layout().parents ?? layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
+        <text fg={focus() === "parents" ? theme.text.default : theme.text.subdued}>Parents</text>
+        <scrollbox flexGrow={1} minHeight={0} scrollbarOptions={{ visible: true }}>
+          <For each={ready()?.parents ?? []}>
+            {(parent) => (
+              <box
+                flexDirection="column"
+                onMouseUp={() => {
+                  setFocus("parents")
+                  selectParent(parent.session.id, true)
+                }}
+              >
+                <text fg={selectedParent() === parent.session.id ? theme.text.default : theme.text.subdued} truncate>
+                  {selectedParent() === parent.session.id ? "> " : "  "}
+                  {parent.session.title ?? parent.session.id}
+                </text>
+                <text fg={theme.text.subdued} truncate>
+                  {parent.counts.actionable} actionable / {parent.counts.total} retained
+                  {parent.session.archived ? " / archived" : ""}
+                </text>
+              </box>
+            )}
+          </For>
+        </scrollbox>
+      </box>
+    )
+  }
+
+  function TimelinePane() {
+    return (
+      <box width={layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
+        <box flexDirection="row" gap={1} flexShrink={0}>
+          <text fg={focus() === "timeline" ? theme.text.default : theme.text.subdued}>Timeline</text>
+          <Show when={selectedParentRecord()}>
+            {(parent: () => NonNullable<ReturnType<typeof selectedParentRecord>>) => (
+              <text fg={theme.text.subdued} truncate>
+                {parent().session.title ?? parent().session.id}
+              </text>
+            )}
+          </Show>
+          <Show
+            when={
+              synchronization.mutationsEnabled() &&
+              !selectedBatchOperations().some((candidate) => pendingFor(candidate.id)) &&
+              batchCancellationCounts(selectedBatchOperations()).cancellable > 0
+            }
+          >
+            <text fg={theme.text.subdued} onMouseUp={cancelBatch}>
+              Cancel batch (Ctrl+B)
+            </text>
+          </Show>
+        </box>
+        <scrollbox
+          ref={(element) => (timelineScroll = element)}
+          flexGrow={1}
+          minHeight={0}
+          scrollbarOptions={{ visible: true }}
+        >
+          <For each={selectedParentRecord()?.batches ?? []}>
+            {(item) => (
+              <box flexDirection="column">
+                <text fg={theme.text.subdued}>Batch {item.id}</text>
+                <For each={selectedParentRecord()?.operations.filter((operation) => operation.batchID === item.id) ?? []}>
+                  {(operation) => (
+                    <box
+                      flexDirection="column"
+                      onMouseUp={() => {
+                        setFocus("timeline")
+                        selectOperation(operation.id, true)
+                      }}
+                    >
+                      <text fg={selectedOperationKey() === operation.id ? theme.text.default : theme.text.subdued} truncate>
+                        {selectedOperationKey() === operation.id ? "> " : "  "}
+                        {operation.text} [{operation.presentationState}]
+                        {pendingFor(operation.id) ? " [Control confirming]" : ""}
+                      </text>
+                      <text fg={theme.text.subdued} wrapMode="none" truncate>
+                        {timelineTrack(operation, observedAt())}
+                      </text>
+                    </box>
+                  )}
+                </For>
+              </box>
+            )}
+          </For>
+          <Show when={selectedParentRecord()?.nextCursor}>
+            <text fg={theme.text.subdued} onMouseUp={loadOlder}>
+              {loadingParent() === selectedParent()
+                ? "Loading older history..."
+                : paginationFailure()?.parentID === selectedParent() &&
+                    paginationFailure()?.cursor === selectedParentRecord()?.nextCursor
+                  ? "Load older history failed. Select to retry."
+                  : "Load older history (Ctrl+O)"}
+            </text>
+          </Show>
+        </scrollbox>
+      </box>
+    )
+  }
+
+  function InspectorPane() {
+    return (
+      <box width={layout().inspector ?? layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
+        <text fg={focus() === "inspector" ? theme.text.default : theme.text.subdued}>Inspector</text>
+        <scrollbox
+          ref={(element) => (inspectorScroll = element)}
+          flexGrow={1}
+          minHeight={0}
+          scrollbarOptions={{ visible: true }}
+        >
+          <Show when={selectedOperation()}>
+            {(operation: () => ProjectedOperation) => (
+              <box flexDirection="column">
+                <For each={operationInspector(operation(), observedAt())}>
+                  {(line) => <text fg={theme.text.subdued}>{line}</text>}
+                </For>
+                <Show when={operation().childID}>
+                  <Show when={selectedPermissions().length > 0}>
+                    <text fg={theme.text.feedback.warning.default}>
+                      Waiting for {selectedPermissions().length} permission request
+                      {selectedPermissions().length === 1 ? "" : "s"}
+                    </text>
+                    <For each={selectedPermissions()}>
+                      {(request) => (
+                        <For each={permissionInspector(request, permissionControls.isPending(request.id))}>
+                          {(line) => <text fg={theme.text.subdued}>{line}</text>}
+                        </For>
+                      )}
+                    </For>
+                    <Show
+                      when={permissionDecisionsEnabled(
+                        operation(),
+                        freshness(),
+                        cancellationPendingFor(operation().id),
+                      )}
+                    >
+                      <text fg={theme.text.subdued} onMouseUp={replyPermission}>
+                        Resolve permission (Ctrl+P)
+                      </text>
+                    </Show>
+                  </Show>
+                  <text fg={theme.text.subdued} onMouseUp={forward}>
+                    Open child Session (Enter)
+                  </text>
+                </Show>
+                <Show when={pendingFor(operation().id)}>
+                  <text fg={theme.text.feedback.warning.default}>
+                    Control confirming; lifecycle remains authoritative.
+                  </text>
+                </Show>
+                <Show
+                  when={
+                    synchronization.mutationsEnabled() &&
+                    operationControls(operation(), Boolean(pendingFor(operation().id))).cancel
+                  }
+                >
+                  <text fg={theme.text.subdued} onMouseUp={cancelOperation}>
+                    Cancel operation (Ctrl+X)
+                  </text>
+                </Show>
+                <Show
+                  when={
+                    synchronization.mutationsEnabled() &&
+                    operationControls(operation(), Boolean(pendingFor(operation().id))).steer
+                  }
+                >
+                  <text fg={theme.text.subdued} onMouseUp={steerOperation}>
+                    Steer child Session (Ctrl+S)
+                  </text>
+                </Show>
+                <Show when={recoveryEnabled(operation(), "retry")}>
+                  <text fg={theme.text.subdued} onMouseUp={retryOperation}>
+                    Retry (Ctrl+T)
+                  </text>
+                  <text fg={theme.text.subdued} onMouseUp={dismissRecovery}>
+                    Dismiss recovery (Ctrl+D)
+                  </text>
+                </Show>
+                <Show when={linkedRetry()}>
+                  <text
+                    fg={theme.text.subdued}
+                    onMouseUp={() => {
+                      const retry = linkedRetry()
+                      if (retry) reveal(retry.id)
+                    }}
+                  >
+                    View retry (Ctrl+V)
+                  </text>
+                </Show>
+              </box>
+            )}
+          </Show>
+        </scrollbox>
+      </box>
+    )
+  }
+
+  function PaneSeparator(separatorProps: { readonly kind: Separator }) {
+    const separatorFocus = () =>
+      separatorProps.kind === "parents" ? focus() === "parentSeparator" : focus() === "timelineSeparator"
+    const focusSeparator = () => setFocus(separatorProps.kind === "parents" ? "parentSeparator" : "timelineSeparator")
+    return (
+      <box
+        width={1}
+        minHeight={0}
+        flexShrink={0}
+        onMouseDown={(event) => {
+          dragX = event.x
+          dragging = separatorProps.kind
+          focusSeparator()
+          event.preventDefault()
+        }}
+        onMouseUp={focusSeparator}
+      >
+        <text fg={separatorFocus() ? theme.text.default : theme.text.subdued}>{separatorFocus() ? "┃" : "│"}</text>
+      </box>
+    )
+  }
+
   return (
-    <box flexDirection="column" padding={1} gap={1}>
-      <text fg={theme.text.default}>Delegation supervision</text>
-      <text fg={theme.text.subdued}>
-        Search: {search() || "all"} (Ctrl+F) | {actionableOnly() ? "actionable only" : "all states"} (Ctrl+A)
-      </text>
-      <Show when={freshness() !== "loading"}>
+    <box
+      width={dimensions().width}
+      height={dimensions().height}
+      minWidth={0}
+      minHeight={0}
+      flexDirection="column"
+      padding={1}
+      onMouseDrag={(event) => {
+        if (dragX === undefined || dragging === undefined) return
+        const delta = event.x - dragX
+        if (delta === 0) return
+        rememberLayout(dragging, dragging === "parents" ? delta : -delta)
+        dragX = event.x
+      }}
+      onMouseDragEnd={() => {
+        dragX = undefined
+        dragging = undefined
+      }}
+      onMouseUp={() => {
+        dragX = undefined
+        dragging = undefined
+      }}
+    >
+      <box flexDirection="row" gap={1} flexShrink={0}>
+        <text fg={theme.text.default}>Delegation supervision</text>
         <text fg={freshness() === "live" ? theme.text.subdued : theme.text.feedback.warning.default}>
-          {freshness() === "live" ? "Live" : freshness() === "stale" ? "Stale" : "Degraded"}
+          {freshness() === "loading" ? "Loading" : freshness() === "live" ? "Live" : freshness() === "stale" ? "Stale" : "Degraded"}
         </text>
+      </box>
+      <box flexDirection="row" gap={1} flexShrink={0}>
+        <text fg={theme.text.subdued} onMouseUp={searchHistory}>
+          Search: {search() || "all"} (Ctrl+F)
+        </text>
+        <text fg={theme.text.subdued} onMouseUp={() => setActionableOnly((value) => !value)}>
+          {actionableOnly() ? "actionable only" : "all states"} (Ctrl+A)
+        </text>
+        <text fg={theme.text.subdued} onMouseUp={() => synchronization.request()}>
+          Refresh (Ctrl+R)
+        </text>
+      </box>
+      <Show when={freshness() !== "loading"}>
+        <Show when={layout().composition === "medium"}>
+          <text fg={theme.text.subdued} onMouseUp={selectParentDialog} truncate>
+            Parent: {selectedParentRecord()?.session.title ?? selectedParentRecord()?.session.id ?? "none"} |{" "}
+            {selectedParentRecord()?.counts.actionable ?? 0} actionable / {selectedParentRecord()?.counts.total ?? 0} retained
+            {" "}(select)
+          </text>
+        </Show>
+        <Show when={layout().composition === "narrow"}>
+          <box flexDirection="row" gap={1}>
+            <text fg={theme.text.subdued} onMouseUp={back}>
+              {stage() === "parents" ? "Back" : "< Back"}
+            </text>
+            <text fg={theme.text.default}>{stage() === "parents" ? "Parents" : stage() === "timeline" ? "Timeline" : "Inspector"}</text>
+          </box>
+        </Show>
       </Show>
       <Show when={health()}>
         <text fg={theme.text.feedback.warning.default}>
@@ -805,119 +1251,37 @@ function SupervisionPage(props: {
           <text fg={theme.text.feedback.warning.default}>This Delegation supervision version is not supported.</text>
         </Match>
         <Match when={ready()}>
-          <For each={ready()?.parents ?? []}>
-            {(parent) => (
-              <box flexDirection="column">
-                <box flexDirection="row" gap={2}>
-                  <text fg={theme.text.subdued}>{selectedParent() === parent.session.id ? ">" : " "}</text>
-                  <text fg={theme.text.default}>{parent.session.title ?? parent.session.id}</text>
-                  <text fg={theme.text.subdued}>
-                    {parent.counts.actionable} actionable / {parent.counts.total} retained
-                  </text>
-                  <Show when={parent.session.archived}>
-                    <text fg={theme.text.subdued}>archived</text>
-                  </Show>
-                </box>
-                <For each={parent.batches}>
-                  {(batch) => (
-                    <box flexDirection="column">
-                      <text fg={theme.text.subdued}> Batch {batch.id}</text>
-                      <For each={parent.operations.filter((operation) => operation.batchID === batch.id)}>
-                        {(operation) => (
-                          <text fg={theme.text.subdued}>
-                            {selectedOperationKey() === operation.id ? "  > " : "    "}
-                            {operation.text} [{operation.presentationState}] {timelineTrack(operation, observedAt())}
-                            {pendingFor(operation.id) ? " | Control confirming" : ""}
-                          </text>
-                        )}
-                      </For>
-                    </box>
-                  )}
-                </For>
-                <Show when={parent.nextCursor}>
-                  <text fg={theme.text.subdued}>
-                    {loadingParent() === parent.session.id
-                      ? "Loading older history..."
-                      : paginationFailure()?.parentID === parent.session.id &&
-                          paginationFailure()?.cursor === parent.nextCursor
-                        ? "Load older history failed. Press Ctrl+O to retry."
-                        : "Load older history (Ctrl+O)"}
-                  </text>
+          <Switch>
+            <Match when={layout().composition === "wide"}>
+              <box flexGrow={1} minHeight={0} minWidth={0} flexDirection="row">
+                <ParentPane />
+                <PaneSeparator kind="parents" />
+                <TimelinePane />
+                <PaneSeparator kind="inspector" />
+                <InspectorPane />
+              </box>
+            </Match>
+            <Match when={layout().composition === "medium"}>
+              <box flexGrow={1} minHeight={0} minWidth={0} flexDirection="row">
+                <TimelinePane />
+                <PaneSeparator kind="inspector" />
+                <InspectorPane />
+              </box>
+            </Match>
+            <Match when={layout().composition === "narrow"}>
+              <box flexGrow={1} minHeight={0} minWidth={0} flexDirection="column">
+                <Show when={stage() === "parents"}>
+                  <ParentPane />
+                </Show>
+                <Show when={stage() === "timeline"}>
+                  <TimelinePane />
+                </Show>
+                <Show when={stage() === "inspector"}>
+                  <InspectorPane />
                 </Show>
               </box>
-            )}
-          </For>
-          <Show when={selectedOperation()}>
-            {(operation: () => ProjectedOperation) => (
-              <box flexDirection="column" marginTop={1}>
-                <text fg={theme.text.default}>Operation inspector</text>
-                <For each={operationInspector(operation(), observedAt())}>
-                  {(line) => <text fg={theme.text.subdued}>{line}</text>}
-                </For>
-                <Show when={operation().childID}>
-                  <Show when={selectedPermissions().length > 0}>
-                    <text fg={theme.text.feedback.warning.default}>
-                      Waiting for {selectedPermissions().length} permission request
-                      {selectedPermissions().length === 1 ? "" : "s"}
-                    </text>
-                    <For each={selectedPermissions()}>
-                      {(request) => (
-                        <For each={permissionInspector(request, permissionControls.isPending(request.id))}>
-                          {(line) => <text fg={theme.text.subdued}>{line}</text>}
-                        </For>
-                      )}
-                    </For>
-                    <Show
-                      when={permissionDecisionsEnabled(
-                        operation(),
-                        freshness(),
-                        cancellationPendingFor(operation().id),
-                      )}
-                    >
-                      <text fg={theme.text.subdued}>Resolve permission (Ctrl+P)</text>
-                    </Show>
-                  </Show>
-                  <text fg={theme.text.subdued}>Open child Session (Enter)</text>
-                </Show>
-                <Show when={pendingFor(operation().id)}>
-                  <text fg={theme.text.feedback.warning.default}>
-                    Control confirming; lifecycle remains authoritative.
-                  </text>
-                </Show>
-                <Show
-                  when={
-                    synchronization.mutationsEnabled() &&
-                    operationControls(operation(), Boolean(pendingFor(operation().id))).cancel
-                  }
-                >
-                  <text fg={theme.text.subdued}>Cancel operation (Ctrl+X)</text>
-                </Show>
-                <Show
-                  when={
-                    synchronization.mutationsEnabled() &&
-                    !selectedBatchOperations().some((candidate) => pendingFor(candidate.id)) &&
-                    batchCancellationCounts(selectedBatchOperations()).cancellable > 0
-                  }
-                >
-                  <text fg={theme.text.subdued}>Cancel batch (Ctrl+B)</text>
-                </Show>
-                <Show
-                  when={
-                    synchronization.mutationsEnabled() &&
-                    operationControls(operation(), Boolean(pendingFor(operation().id))).steer
-                  }
-                >
-                  <text fg={theme.text.subdued}>Steer child Session (Ctrl+S)</text>
-                </Show>
-                <Show when={recoveryEnabled(operation(), "retry")}>
-                  <text fg={theme.text.subdued}>Retry (Ctrl+T) | Dismiss recovery (Ctrl+D)</text>
-                </Show>
-                <Show when={linkedRetry()}>
-                  <text fg={theme.text.subdued}>View retry (Ctrl+V)</text>
-                </Show>
-              </box>
-            )}
-          </Show>
+            </Match>
+          </Switch>
         </Match>
       </Switch>
     </box>

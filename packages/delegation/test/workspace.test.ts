@@ -6,6 +6,7 @@ import { Effect, Schema } from "effect"
 import { testRender } from "@opentui/solid"
 import type { Context, KeymapLayer, Page, Route } from "@opencode-ai/plugin/tui/context"
 import { initializeProfile } from "../src/distribution"
+import type { PresentationMemory } from "../src/presentation"
 import { open } from "../src/storage"
 import TuiPlugin from "../src/tui"
 import {
@@ -358,7 +359,7 @@ describe("Delegation supervision workspace", () => {
     let page: Page | undefined
     let route: Route = { type: "home" }
     const calls: unknown[] = []
-    const memory = { locations: {} }
+    const memory: PresentationMemory = { locations: {} }
     const layers: KeymapLayer[] = []
     const context = {
       location: { directory: "/repo" },
@@ -427,7 +428,12 @@ describe("Delegation supervision workspace", () => {
       height: 20,
     })
     try {
-      await app.waitForFrame((frame) => frame.includes("Parent") && frame.includes("2 actionable / 2 retained"))
+      const medium = await app.waitForFrame(
+        (frame) => frame.includes("Parent: Parent") && frame.includes("2 actionable / 2 retained"),
+      )
+      expect(medium).toContain("Timeline")
+      expect(medium).toContain("Inspector")
+      expect(medium).not.toContain("Parents\n")
       expect(calls).toEqual([
         {
           pluginID: "opencode.delegation",
@@ -436,11 +442,93 @@ describe("Delegation supervision workspace", () => {
           input: {},
         },
       ])
+      const commands = new Map(layers.flatMap((layer) => layer.commands ?? []).map((command) => [command.id, command]))
+      await app.mockMouse.click(3, 7)
+      await app.waitForFrame((frame) => frame.includes("index 0"))
+      await app.mockMouse.click(3, 10)
+      await app.waitForFrame((frame) => frame.includes("index 1"))
+      commands.get("delegation.supervision.navigation.previous")?.run()
+      await app.waitForFrame((frame) => frame.includes("index 0"))
+      commands.get("delegation.supervision.navigation.next")?.run()
+      await app.waitForFrame((frame) => frame.includes("index 1"))
+      commands.get("delegation.supervision.scroll.page-down")?.run()
+      commands.get("delegation.supervision.scroll.page-up")?.run()
       const search = layers
         .flatMap((layer) => layer.commands ?? [])
         .find((command) => command.id === "delegation.supervision.filter.search")
       await search?.run()
       await app.waitForFrame((frame) => frame.includes("Search: nested"))
+
+      expect([...commands.keys()]).toEqual(
+        expect.arrayContaining([
+          "delegation.supervision.refresh",
+          "delegation.supervision.permission.reply",
+          "delegation.supervision.operation.cancel",
+          "delegation.supervision.batch.cancel",
+          "delegation.supervision.operation.steer",
+          "delegation.supervision.operation.retry",
+          "delegation.supervision.recovery.dismiss",
+          "delegation.supervision.retry.view",
+          "delegation.supervision.filter.search",
+          "delegation.supervision.history.older",
+          "delegation.supervision.filter.actionable",
+          "delegation.supervision.scroll.page-up",
+          "delegation.supervision.scroll.page-down",
+        ]),
+      )
+      commands.get("delegation.supervision.focus.next")?.run()
+      await app.waitForFrame((frame) => frame.includes("┃"))
+      commands.get("delegation.supervision.navigation.right")?.run()
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(34)
+
+      app.resize(79, 24)
+      const narrow = await app.waitForFrame((frame) => frame.includes("Parents") && !frame.includes("Inspector"))
+      expect(narrow).not.toContain("│")
+      commands.get("delegation.supervision.child.open")?.run()
+      await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
+      commands.get("delegation.supervision.child.open")?.run()
+      await app.waitForFrame((frame) => frame.includes("Inspector") && frame.includes("Operation"))
+      commands.get("delegation.supervision.back")?.run()
+      await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
+
+      for (const [width, height, expected] of [
+        [120, 30, ["Parents", "Timeline", "Inspector"]],
+        [119, 30, ["Parent:", "Timeline", "Inspector"]],
+        [140, 40, ["Parents", "Timeline", "Inspector"]],
+        [100, 30, ["Parent:", "Timeline", "Inspector"]],
+      ] as const) {
+        app.resize(width, height)
+        const frame = await app.waitForFrame((value) => expected.every((label) => value.includes(label)))
+        expect(frame.split("\n")).toHaveLength(height + 1)
+      }
+      const separatorX = app
+        .captureCharFrame()
+        .split("\n")
+        .find((line) => line.includes("Timeline") && line.includes("│"))!
+        .indexOf("│")
+      await app.mockMouse.click(separatorX, 4)
+      await app.waitForFrame((frame) => frame.includes("┃"))
+      await app.mockMouse.drag(separatorX, 4, separatorX - 5, 4)
+      await app.renderOnce()
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(39)
+
+      app.resize(140, 40)
+      const wideFrame = await app.waitForFrame(
+        (frame) => frame.includes("Parents") && frame.includes("Timeline") && frame.includes("Inspector"),
+      )
+      const wideRows = wideFrame.split("\n")
+      const wideY = wideRows.findIndex((line) => line.includes("Parents") && line.includes("Timeline"))
+      const parentsSeparatorX = wideRows[wideY].indexOf("│")
+      await app.mockMouse.drag(parentsSeparatorX, wideY, parentsSeparatorX + 3, wideY)
+      await app.renderOnce()
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(27)
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(39)
+
+      app.resize(70, 24)
+      await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
+      app.resize(50, 16)
+      const minimum = await app.waitForFrame((frame) => frame.includes("Timeline") && frame.includes("nested [terminal]"))
+      expect(minimum.split("\n")).toHaveLength(17)
     } finally {
       app.renderer.destroy()
     }
