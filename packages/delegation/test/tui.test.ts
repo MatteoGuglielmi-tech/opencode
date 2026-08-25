@@ -1,19 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import type { Context, KeymapLayer, Page, Route } from "@opencode-ai/plugin/tui/context"
+import type { Context, Page, Route, SlotClaim } from "@opencode-ai/plugin/tui/context"
 import TuiPlugin, { openChildSession, openSupervision, returnFromSupervision } from "../src/tui"
 
 describe("Delegation supervision TUI entry", () => {
-  test("registers one page and one shared palette and slash command", () => {
+  test("registers one page and one global command slot", () => {
     const harness = setup({ type: "session", sessionID: "ses_origin" })
 
     expect(harness.page?.name).toBe("supervision")
-    expect(harness.command).toMatchObject({
-      id: "delegation.supervision.open",
-      palette: true,
-      slash: { name: "delegations" },
-    })
-    harness.command?.run()
-    expect(harness.navigated).toEqual({
+    expect(harness.slot).toMatchObject({ append: "app" })
+    expect(openSupervision({ type: "session", sessionID: "ses_origin" })).toEqual({
       type: "plugin",
       name: "supervision",
       data: {
@@ -106,16 +101,10 @@ describe("Delegation supervision TUI entry", () => {
 
 function setup(route: Route) {
   let page: Page | undefined
-  let layer: KeymapLayer | undefined
-  let navigated: unknown
+  let slot: SlotClaim | undefined
   const context = {
     storage: {
       memory: (_key: string, options: { initial: object }) => [options.initial, () => {}],
-    },
-    keymap: {
-      layer: (input: () => KeymapLayer) => {
-        layer = input()
-      },
     },
     ui: {
       dialog: { clear() {} },
@@ -125,9 +114,11 @@ function setup(route: Route) {
           return () => {}
         },
         current: () => route,
-        navigate: (input: unknown) => {
-          navigated = input
-        },
+        navigate() {},
+      },
+      slot: (input: SlotClaim) => {
+        slot = input
+        return () => {}
       },
     },
   } as unknown as Context
@@ -136,11 +127,8 @@ function setup(route: Route) {
     get page() {
       return page
     },
-    get command() {
-      return layer?.commands?.[0]
-    },
-    get navigated() {
-      return navigated
+    get slot() {
+      return slot
     },
   }
 }

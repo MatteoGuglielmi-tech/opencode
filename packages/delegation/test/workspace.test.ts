@@ -409,7 +409,7 @@ describe("Delegation supervision workspace", () => {
         },
       },
       keymap: { layer: (input: () => KeymapLayer) => layers.push(input()) },
-      ui: {
+        ui: {
         dialog: {
           clear() {},
           set(value: unknown) {
@@ -419,7 +419,7 @@ describe("Delegation supervision workspace", () => {
         },
         toast: { show() {} },
         tabs: { open: () => false },
-        router: {
+          router: {
           register: (input: Page) => {
             page = input
             return () => {}
@@ -428,9 +428,10 @@ describe("Delegation supervision workspace", () => {
           exists: () => true,
           navigate: (input: Route) => {
             route = input
+            },
           },
+          slot: () => () => {},
         },
-      },
     } as unknown as Context
     void TuiPlugin.setup(context)
     route = { type: "plugin", id: "opencode.delegation", name: "supervision", data: { returnRoute: route } }

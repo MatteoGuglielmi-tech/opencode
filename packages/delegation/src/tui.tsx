@@ -1412,6 +1412,27 @@ function routeValue(value: unknown): Route | undefined {
   }
 }
 
+function Commands(props: { readonly context: Context }) {
+  props.context.keymap.layer(() => ({
+    mode: "global",
+    commands: [
+      {
+        id: "delegation.supervision.open",
+        title: "Open Delegation supervision",
+        group: "Delegation",
+        palette: true,
+        slash: { name: "delegations" },
+        run() {
+          const destination = openSupervision(props.context.ui.router.current())
+          if (destination) props.context.ui.router.navigate(destination)
+          props.context.ui.dialog.clear()
+        },
+      },
+    ],
+  }))
+  return null
+}
+
 export default Plugin.define({
   id: ID,
   setup(context) {
@@ -1422,22 +1443,6 @@ export default Plugin.define({
       name: PAGE,
       render: () => <SupervisionPage context={context} memory={memory} updateMemory={updateMemory} />,
     })
-    context.keymap.layer(() => ({
-      mode: "global",
-      commands: [
-        {
-          id: "delegation.supervision.open",
-          title: "Open Delegation supervision",
-          group: "Delegation",
-          palette: true,
-          slash: { name: "delegations" },
-          run() {
-            const destination = openSupervision(context.ui.router.current())
-            if (destination) context.ui.router.navigate(destination)
-            context.ui.dialog.clear()
-          },
-        },
-      ],
-    }))
+    context.ui.slot({ append: "app", render: () => <Commands context={context} /> })
   },
 })
