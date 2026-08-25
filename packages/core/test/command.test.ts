@@ -125,6 +125,17 @@ describe("Command", () => {
     }),
   )
 
+  it.effect("lists scoped executors for command clients", () =>
+    Effect.gen(function* () {
+      const command = yield* Command.Service
+      const registration = yield* command.register("execute", () => Effect.succeed(output))
+
+      expect(yield* command.list()).toContainEqual({ name: "execute", template: "" })
+      yield* registration.dispose
+      expect(yield* command.list()).not.toContainEqual({ name: "execute", template: "" })
+    }),
+  )
+
   it.effect("rejects duplicates without replacing the active executor", () =>
     Effect.gen(function* () {
       const command = yield* Command.Service

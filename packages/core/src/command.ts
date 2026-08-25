@@ -158,12 +158,17 @@ export const layer = (options?: ShellSelect.Options) =>
         get: Effect.fn("Command.get")(function* (name) {
           const command = staticCommand(name)
           if (command) return command
+          if (executors.has(name)) return Info.make({ name, template: "" })
           return (yield* mcpCommands()).find((command) => command.name === name)
         }),
         list: Effect.fn("Command.list")(function* () {
           const commands = Array.from(state.get().commands.values()) as Info[]
           const names = new Set(commands.map((command) => command.name))
-          return [...commands, ...(yield* mcpCommands()).filter((command) => !names.has(command.name))]
+          const executable = Array.from(executors.keys())
+            .filter((name) => !names.has(name))
+            .map((name) => Info.make({ name, template: "" }))
+          executable.forEach((command) => names.add(command.name))
+          return [...commands, ...executable, ...(yield* mcpCommands()).filter((command) => !names.has(command.name))]
         }),
         evaluate: Effect.fn("Command.evaluate")(function* (input) {
           const command = staticCommand(input.name)
