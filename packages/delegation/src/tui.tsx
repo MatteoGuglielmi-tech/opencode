@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode-ai/plugin/tui"
 import type { Context, Destination, Route } from "@opencode-ai/plugin/tui/context"
-import type { PermissionRequest } from "@opencode-ai/client"
+import { isPermissionNotFoundError, type PermissionReply, type PermissionRequest } from "@opencode-ai/client"
 import { randomUUID } from "node:crypto"
 import { batch, createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js"
 import {
@@ -31,6 +31,16 @@ import {
   type PresentationMemory,
   type PresentationState,
 } from "./presentation.js"
+import {
+  createPermissionControls,
+  permissionChoices,
+  permissionDecisionsEnabled,
+  permissionInspector,
+  permissionReplyLabel,
+  permissionRequestForSubmission,
+  type PermissionControlResult,
+  type PendingPermissionControl,
+} from "./permission-controls.js"
 
 const PAGE = "supervision"
 const ID = "opencode.delegation"
@@ -99,6 +109,7 @@ function SupervisionPage(props: {
   const [loadingParent, setLoadingParent] = createSignal<string>()
   const [paging, setPaging] = createSignal(false)
   const [pendingControls, setPendingControls] = createSignal<ReadonlyArray<PendingSupervisionControl>>([])
+  const [pendingPermissions, setPendingPermissions] = createSignal<ReadonlyArray<PendingPermissionControl>>([])
   const [steerDrafts, setSteerDrafts] = createSignal<Readonly<Record<string, string>>>({})
   const [confirmedGeneration, setConfirmedGeneration] = createSignal(0)
   const synchronization = createSupervisionSynchronization<PermissionRequest>({
@@ -118,7 +129,7 @@ function SupervisionPage(props: {
         setCurrent(state.combined.workspace)
       })
     },
-    unresolvedLocal: () => pendingControls().length > 0,
+    unresolvedLocal: () => pendingControls().length > 0 || pendingPermissions().length > 0,
   })
   const controls = createSupervisionControls({
     invocationID: () => `ctl_${randomUUID().replaceAll("-", "")}`,
@@ -136,6 +147,19 @@ function SupervisionPage(props: {
       if (state.freshness !== "live") throw new Error("Authoritative Delegation reconciliation is unavailable")
     },
     publish: setPendingControls,
+  })
+  const permissionControls = createPermissionControls({
+    invoke: (input) => props.context.client.permission.reply(input),
+    reconcile: async () => {
+      const state = await synchronization.reconcile()
+      if (state.freshness !== "live") throw new Error("Authoritative permission reconciliation is unavailable")
+    },
+    exists: (sessionID, requestID) =>
+      permissions()
+        .get(sessionID)
+        ?.some((request) => request.id === requestID) ?? false,
+    notFound: isPermissionNotFoundError,
+    publish: setPendingPermissions,
   })
   synchronization.start()
   const stopEvents = props.context.data.listen((event) => {
@@ -188,6 +212,10 @@ function SupervisionPage(props: {
   })
   const pendingFor = (operationID: string) =>
     pendingControls().find((control) => control.operationIDs.includes(operationID))
+  const cancellationPendingFor = (operationID: string) =>
+    pendingControls().some(
+      (control) => control.operationIDs.includes(operationID) && control.action.type.startsWith("cancel-"),
+    )
   const recoveryEnabled = (operation: ProjectedOperation, action: "retry" | "dismiss") =>
     synchronization.mutationsEnabled() && recoveryControls(operation, Boolean(pendingFor(operation.id)))[action]
   const linkedRetry = createMemo(() => {
@@ -339,25 +367,109 @@ function SupervisionPage(props: {
     if (result?.type !== "workspace" || freshness() !== "live" || result.generation === confirmedGeneration()) return
     setConfirmedGeneration(result.generation)
     const unresolved = controls.pending()
-    if (unresolved.length === 0) return
-    void controls.confirm().then((results) =>
-      results.forEach((control) => {
-        if (control.status === "uncertain") return
-        const action = unresolved.find((candidate) => candidate.invocationID === control.invocationID)?.action
-        if (
-          !reportControl(
-            control,
-            controlCommittedMessage(action),
-            action && "operationID" in action ? action.operationID : undefined,
+    if (unresolved.length > 0)
+      void controls.confirm().then((results) =>
+        results.forEach((control) => {
+          if (control.status === "uncertain") return
+          const action = unresolved.find((candidate) => candidate.invocationID === control.invocationID)?.action
+          if (
+            !reportControl(
+              control,
+              controlCommittedMessage(action),
+              action && "operationID" in action ? action.operationID : undefined,
+            )
           )
-        )
-          return
-        if (action?.type === "retry") reveal(action.operationID)
-        if (action?.type !== "steer") return
-        setSteerDrafts((drafts) => ({ ...drafts, [action.operationID]: "" }))
+            return
+          if (action?.type === "retry") reveal(action.operationID)
+          if (action?.type !== "steer") return
+          setSteerDrafts((drafts) => ({ ...drafts, [action.operationID]: "" }))
+        }),
+      )
+    if (permissionControls.pending().length > 0)
+      void permissionControls.confirm().then((results) => results.forEach(reportPermission))
+  })
+  const reportPermission = (result: PermissionControlResult) => {
+    if (result.status === "applied") {
+      props.context.ui.toast.show({ variant: "success", message: "Permission decision applied." })
+      return
+    }
+    if (result.status === "expired") {
+      props.context.ui.toast.show({ variant: "info", message: "Permission expired; no decision was applied." })
+      return
+    }
+    if (result.status === "blocked") {
+      props.context.ui.toast.show({ variant: "info", message: "This permission request already has a reply pending." })
+      return
+    }
+    props.context.ui.toast.show({
+      variant: "warning",
+      message:
+        result.status === "resolved"
+          ? "Permission request is no longer open; the uncertain reply was not replayed."
+          : `Permission reply is uncertain and was not replayed${result.detail ? `: ${result.detail}` : "."}`,
+    })
+  }
+  const replyPermission = async () => {
+    const operation = selectedOperation()
+    if (
+      !permissionDecisionsEnabled(operation, freshness(), operation && cancellationPendingFor(operation.id)) ||
+      !operation?.childID
+    )
+      return
+    const available = selectedPermissions().filter((request) => !permissionControls.isPending(request.id))
+    if (available.length === 0) return
+    const requestID = await props.context.ui.dialog.select({
+      title: "Resolve child Session permission",
+      options: available.map((request) => ({
+        title: `${request.action} (${request.id})`,
+        value: request.id,
+        description: request.resources.join(", "),
+      })),
+    })
+    const request = available.find((candidate) => candidate.id === requestID)
+    if (!request) return
+    const reply = await props.context.ui.dialog.select<PermissionReply>({
+      title: `Permission ${request.id}`,
+      options: permissionChoices(request).map((value) => ({
+        title: permissionReplyLabel(value),
+        value,
+      })),
+    })
+    if (!reply) return
+    const message =
+      reply === "reject"
+        ? await props.context.ui.dialog.prompt({
+            title: "Reject permission",
+            description: "Tell OpenCode what to do differently",
+          })
+        : undefined
+    if (reply === "reject" && message === undefined) return
+    const state = await synchronization.reconcile()
+    const latest =
+      state.combined?.workspace.parents
+        .flatMap((parent) => parent.operations)
+        .find((candidate) => candidate.id === operation.id)
+    const latestRequest = permissionRequestForSubmission({
+      operation: latest,
+      freshness: state.freshness,
+      cancellationPending: cancellationPendingFor(operation.id),
+      requests: latest?.childID ? (state.combined?.permissions.get(latest.childID) ?? []) : [],
+      requestID: request.id,
+      reply,
+    })
+    if (!latest?.childID || !latestRequest || permissionControls.isPending(request.id)) {
+      props.context.ui.toast.show({ variant: "info", message: "Permission state changed; no decision was applied." })
+      return
+    }
+    reportPermission(
+      await permissionControls.submit({
+        sessionID: latest.childID,
+        requestID: latestRequest.id,
+        reply,
+        ...(message ? { message } : {}),
       }),
     )
-  })
+  }
   const cancelOperation = async () => {
     const operation = selectedOperation()
     if (
@@ -540,6 +652,19 @@ function SupervisionPage(props: {
         run() {
           synchronization.request()
         },
+      },
+      {
+        id: "delegation.supervision.permission.reply",
+        title: "Resolve child Session permission",
+        bind: "ctrl+p",
+        enabled: () => {
+          const operation = selectedOperation()
+          return Boolean(
+            selectedPermissions().some((request) => !permissionControls.isPending(request.id)) &&
+              permissionDecisionsEnabled(operation, freshness(), operation && cancellationPendingFor(operation.id)),
+          )
+        },
+        run: replyPermission,
       },
       {
         id: "delegation.supervision.operation.cancel",
@@ -730,7 +855,28 @@ function SupervisionPage(props: {
                   {(line) => <text fg={theme.text.subdued}>{line}</text>}
                 </For>
                 <Show when={operation().childID}>
-                  <text fg={theme.text.subdued}>Open permission requests: {selectedPermissions().length}</text>
+                  <Show when={selectedPermissions().length > 0}>
+                    <text fg={theme.text.feedback.warning.default}>
+                      Waiting for {selectedPermissions().length} permission request
+                      {selectedPermissions().length === 1 ? "" : "s"}
+                    </text>
+                    <For each={selectedPermissions()}>
+                      {(request) => (
+                        <For each={permissionInspector(request, permissionControls.isPending(request.id))}>
+                          {(line) => <text fg={theme.text.subdued}>{line}</text>}
+                        </For>
+                      )}
+                    </For>
+                    <Show
+                      when={permissionDecisionsEnabled(
+                        operation(),
+                        freshness(),
+                        cancellationPendingFor(operation().id),
+                      )}
+                    >
+                      <text fg={theme.text.subdued}>Resolve permission (Ctrl+P)</text>
+                    </Show>
+                  </Show>
                   <text fg={theme.text.subdued}>Open child Session (Enter)</text>
                 </Show>
                 <Show when={pendingFor(operation().id)}>
