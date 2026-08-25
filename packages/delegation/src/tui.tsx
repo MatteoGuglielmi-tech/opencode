@@ -43,6 +43,7 @@ import {
   type PendingPermissionControl,
 } from "./permission-controls.js"
 import { layoutFor, resizeLayout, type Separator } from "./responsive.js"
+import { autoDirection, directionFor, horizontalDelta, ltrDirection, resizeDelta, rowDirection } from "./direction.js"
 
 const PAGE = "supervision"
 const ID = "opencode.delegation"
@@ -97,6 +98,11 @@ function SupervisionPage(props: {
   const location = props.context.location ?? props.context.data.location.default()
   const memoryKey = locationIdentity(location)
   const dimensions = useTerminalDimensions()
+  const direction = () => directionFor(props.context.options?.direction)
+  const configureDialog = () => {
+    props.context.ui.dialog.set({ direction: direction() })
+    return props.context.ui.dialog
+  }
   const restored = sanitizePresentationState(props.memory.locations[memoryKey], dimensions().width)
   const [search, setSearch] = createSignal(restored.filters.search)
   const [actionableOnly, setActionableOnly] = createSignal(restored.filters.actionableOnly)
@@ -284,13 +290,13 @@ function SupervisionPage(props: {
     const parentID =
       available.length === 1
         ? available[0].session.id
-        : await props.context.ui.dialog.select({
+        : await configureDialog().select({
             title: "Load older Delegation history",
             current: selectedParent(),
             options: available.map((parent) => ({
-              title: parent.session.title ?? parent.session.id,
+              title: parent.session.title ? autoDirection(parent.session.title) : ltrDirection(parent.session.id),
               value: parent.session.id,
-              description: `${parent.operations.length} loaded / ${parent.counts.total} retained`,
+              description: `${ltrDirection(parent.operations.length)} loaded / ${ltrDirection(parent.counts.total)} retained`,
             })),
           })
     const parent = available.find((candidate) => candidate.session.id === parentID)
@@ -440,18 +446,18 @@ function SupervisionPage(props: {
       return
     const available = selectedPermissions().filter((request) => !permissionControls.isPending(request.id))
     if (available.length === 0) return
-    const requestID = await props.context.ui.dialog.select({
+    const requestID = await configureDialog().select({
       title: "Resolve child Session permission",
       options: available.map((request) => ({
-        title: `${request.action} (${request.id})`,
+        title: `${autoDirection(request.action)} (${ltrDirection(request.id)})`,
         value: request.id,
-        description: request.resources.join(", "),
+        description: ltrDirection(request.resources.join(", ")),
       })),
     })
     const request = available.find((candidate) => candidate.id === requestID)
     if (!request) return
-    const reply = await props.context.ui.dialog.select<PermissionReply>({
-      title: `Permission ${request.id}`,
+    const reply = await configureDialog().select<PermissionReply>({
+      title: `Permission ${ltrDirection(request.id)}`,
       options: permissionChoices(request).map((value) => ({
         title: permissionReplyLabel(value),
         value,
@@ -460,7 +466,7 @@ function SupervisionPage(props: {
     if (!reply) return
     const message =
       reply === "reject"
-        ? await props.context.ui.dialog.prompt({
+        ? await configureDialog().prompt({
             title: "Reject permission",
             description: "Tell OpenCode what to do differently",
           })
@@ -525,9 +531,9 @@ function SupervisionPage(props: {
       props.context.ui.toast.show({ variant: "info", message: "This batch no longer has cancellable operations." })
       return
     }
-    const confirmed = await props.context.ui.dialog.confirm({
-      title: `Cancel batch ${selected.batchID}`,
-      message: `${parent?.session.title ?? selected.parentID}: ${counts.cancellable} cancellable, ${counts.pending} cancellation-pending, ${counts.terminal} terminal. Non-terminal members will be targeted; retained records and child Sessions remain available.`,
+    const confirmed = await configureDialog().confirm({
+      title: `Cancel batch ${ltrDirection(selected.batchID)}`,
+      message: `${parent?.session.title ? autoDirection(parent.session.title) : ltrDirection(selected.parentID)}: ${ltrDirection(counts.cancellable)} cancellable, ${ltrDirection(counts.pending)} cancellation-pending, ${ltrDirection(counts.terminal)} terminal. Non-terminal members will be targeted; retained records and child Sessions remain available.`,
       label: { confirm: "Cancel batch" },
     })
     if (!confirmed) return
@@ -567,7 +573,7 @@ function SupervisionPage(props: {
       !operationControls(operation, Boolean(pendingFor(operation.id))).steer
     )
       return
-    const text = await props.context.ui.dialog.prompt({
+    const text = await configureDialog().prompt({
       title: "Steer child Session",
       description: "Guidance is retained until commitment is confirmed.",
       value: steerDrafts()[operation.id] ?? "",
@@ -607,7 +613,7 @@ function SupervisionPage(props: {
   const dismissRecovery = async () => {
     const operation = selectedOperation()
     if (!operation || !recoveryEnabled(operation, "dismiss")) return
-    const confirmed = await props.context.ui.dialog.confirm({
+    const confirmed = await configureDialog().confirm({
       title: "Dismiss recovery",
       message:
         "Permanently consume this operation's recovery eligibility? The operation, timeline, Recovery notice, and child Session remain retained.",
@@ -739,19 +745,19 @@ function SupervisionPage(props: {
     )
   }
   const selectParentDialog = async () => {
-    const parentID = await props.context.ui.dialog.select({
+    const parentID = await configureDialog().select({
       title: "Select parent Session",
       current: selectedParent(),
       options: (ready()?.parents ?? []).map((parent) => ({
-        title: parent.session.title ?? parent.session.id,
+        title: parent.session.title ? autoDirection(parent.session.title) : ltrDirection(parent.session.id),
         value: parent.session.id,
-        description: `${parent.counts.actionable} actionable / ${parent.counts.total} retained`,
+        description: `${ltrDirection(parent.counts.actionable)} actionable / ${ltrDirection(parent.counts.total)} retained`,
       })),
     })
     if (parentID) selectParent(parentID)
   }
   const searchHistory = async () => {
-    const value = await props.context.ui.dialog.prompt({
+    const value = await configureDialog().prompt({
       title: "Search Delegation history",
       description: "Search Delegation operations, identifiers, and Sessions",
       value: search(),
@@ -917,9 +923,10 @@ function SupervisionPage(props: {
         title: "Move or resize left",
         bind: "left",
         run() {
-          if (focus() === "parentSeparator") return rememberLayout("parents", -2)
-          if (focus() === "timelineSeparator") return rememberLayout("inspector", 2)
-          moveFocus(-1)
+          if (focus() === "parentSeparator") return rememberLayout("parents", resizeDelta("parents", -2, direction()))
+          if (focus() === "timelineSeparator")
+            return rememberLayout("inspector", resizeDelta("inspector", -2, direction()))
+          moveFocus(horizontalDelta(-1, direction()))
         },
       },
       {
@@ -927,9 +934,10 @@ function SupervisionPage(props: {
         title: "Move or resize right",
         bind: "right",
         run() {
-          if (focus() === "parentSeparator") return rememberLayout("parents", 2)
-          if (focus() === "timelineSeparator") return rememberLayout("inspector", -2)
-          moveFocus(1)
+          if (focus() === "parentSeparator") return rememberLayout("parents", resizeDelta("parents", 2, direction()))
+          if (focus() === "timelineSeparator")
+            return rememberLayout("inspector", resizeDelta("inspector", 2, direction()))
+          moveFocus(horizontalDelta(1, direction()))
         },
       },
       {
@@ -962,11 +970,11 @@ function SupervisionPage(props: {
                 }}
               >
                 <text fg={selectedParent() === parent.session.id ? theme.text.default : theme.text.subdued} truncate>
-                  {selectedParent() === parent.session.id ? "> " : "  "}
-                  {parent.session.title ?? parent.session.id}
+                  {selectedParent() === parent.session.id ? (direction() === "rtl" ? " <" : "> ") : "  "}
+                  {parent.session.title ? autoDirection(parent.session.title) : ltrDirection(parent.session.id)}
                 </text>
                 <text fg={theme.text.subdued} truncate>
-                  {parent.counts.actionable} actionable / {parent.counts.total} retained
+                  {ltrDirection(parent.counts.actionable)} actionable / {ltrDirection(parent.counts.total)} retained
                   {parent.session.archived ? " / archived" : ""}
                 </text>
               </box>
@@ -980,12 +988,12 @@ function SupervisionPage(props: {
   function TimelinePane() {
     return (
       <box width={layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
-        <box flexDirection="row" gap={1} flexShrink={0}>
+        <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
           <text fg={focus() === "timeline" ? theme.text.default : theme.text.subdued}>Timeline</text>
           <Show when={selectedParentRecord()}>
             {(parent: () => NonNullable<ReturnType<typeof selectedParentRecord>>) => (
               <text fg={theme.text.subdued} truncate>
-                {parent().session.title ?? parent().session.id}
+                {parent().session.title ? autoDirection(parent().session.title!) : ltrDirection(parent().session.id)}
               </text>
             )}
           </Show>
@@ -997,7 +1005,7 @@ function SupervisionPage(props: {
             }
           >
             <text fg={theme.text.subdued} onMouseUp={cancelBatch}>
-              Cancel batch (Ctrl+B)
+              Cancel batch {ltrDirection("(Ctrl+B)")}
             </text>
           </Show>
         </box>
@@ -1010,7 +1018,7 @@ function SupervisionPage(props: {
           <For each={selectedParentRecord()?.batches ?? []}>
             {(item) => (
               <box flexDirection="column">
-                <text fg={theme.text.subdued}>Batch {item.id}</text>
+                <text fg={theme.text.subdued}>Batch {ltrDirection(item.id)}</text>
                 <For each={selectedParentRecord()?.operations.filter((operation) => operation.batchID === item.id) ?? []}>
                   {(operation) => (
                     <box
@@ -1020,13 +1028,16 @@ function SupervisionPage(props: {
                         selectOperation(operation.id, true)
                       }}
                     >
-                      <text fg={selectedOperationKey() === operation.id ? theme.text.default : theme.text.subdued} truncate>
-                        {selectedOperationKey() === operation.id ? "> " : "  "}
-                        {operation.text} [{operation.presentationState}]
+                      <text
+                        fg={selectedOperationKey() === operation.id ? theme.text.default : theme.text.subdued}
+                        truncate
+                      >
+                        {selectedOperationKey() === operation.id ? (direction() === "rtl" ? " <" : "> ") : "  "}
+                        {autoDirection(operation.text)} {ltrDirection(`[${operation.presentationState}]`)}
                         {pendingFor(operation.id) ? " [Control confirming]" : ""}
                       </text>
                       <text fg={theme.text.subdued} wrapMode="none" truncate>
-                        {timelineTrack(operation, observedAt())}
+                        {ltrDirection(timelineTrack(operation, observedAt()))}
                       </text>
                     </box>
                   )}
@@ -1036,12 +1047,14 @@ function SupervisionPage(props: {
           </For>
           <Show when={selectedParentRecord()?.nextCursor}>
             <text fg={theme.text.subdued} onMouseUp={loadOlder}>
-              {loadingParent() === selectedParent()
-                ? "Loading older history..."
-                : paginationFailure()?.parentID === selectedParent() &&
-                    paginationFailure()?.cursor === selectedParentRecord()?.nextCursor
-                  ? "Load older history failed. Select to retry."
-                  : "Load older history (Ctrl+O)"}
+              {loadingParent() === selectedParent() ? (
+                "Loading older history..."
+              ) : paginationFailure()?.parentID === selectedParent() &&
+                paginationFailure()?.cursor === selectedParentRecord()?.nextCursor ? (
+                "Load older history failed. Select to retry."
+              ) : (
+                <>Load older history {ltrDirection("(Ctrl+O)")}</>
+              )}
             </text>
           </Show>
         </scrollbox>
@@ -1068,13 +1081,13 @@ function SupervisionPage(props: {
                 <Show when={operation().childID}>
                   <Show when={selectedPermissions().length > 0}>
                     <text fg={theme.text.feedback.warning.default}>
-                      Waiting for {selectedPermissions().length} permission request
+                      Waiting for {ltrDirection(selectedPermissions().length)} permission request
                       {selectedPermissions().length === 1 ? "" : "s"}
                     </text>
                     <For each={selectedPermissions()}>
                       {(request) => (
                         <For each={permissionInspector(request, permissionControls.isPending(request.id))}>
-                          {(line) => <text fg={theme.text.subdued}>{line}</text>}
+                          {(line) => <text fg={theme.text.subdued}>{ltrDirection(line)}</text>}
                         </For>
                       )}
                     </For>
@@ -1086,12 +1099,12 @@ function SupervisionPage(props: {
                       )}
                     >
                       <text fg={theme.text.subdued} onMouseUp={replyPermission}>
-                        Resolve permission (Ctrl+P)
+                        Resolve permission {ltrDirection("(Ctrl+P)")}
                       </text>
                     </Show>
                   </Show>
                   <text fg={theme.text.subdued} onMouseUp={forward}>
-                    Open child Session (Enter)
+                    Open child Session {ltrDirection("(Enter)")}
                   </text>
                 </Show>
                 <Show when={pendingFor(operation().id)}>
@@ -1106,7 +1119,7 @@ function SupervisionPage(props: {
                   }
                 >
                   <text fg={theme.text.subdued} onMouseUp={cancelOperation}>
-                    Cancel operation (Ctrl+X)
+                    Cancel operation {ltrDirection("(Ctrl+X)")}
                   </text>
                 </Show>
                 <Show
@@ -1116,15 +1129,15 @@ function SupervisionPage(props: {
                   }
                 >
                   <text fg={theme.text.subdued} onMouseUp={steerOperation}>
-                    Steer child Session (Ctrl+S)
+                    Steer child Session {ltrDirection("(Ctrl+S)")}
                   </text>
                 </Show>
                 <Show when={recoveryEnabled(operation(), "retry")}>
                   <text fg={theme.text.subdued} onMouseUp={retryOperation}>
-                    Retry (Ctrl+T)
+                    Retry {ltrDirection("(Ctrl+T)")}
                   </text>
                   <text fg={theme.text.subdued} onMouseUp={dismissRecovery}>
-                    Dismiss recovery (Ctrl+D)
+                    Dismiss recovery {ltrDirection("(Ctrl+D)")}
                   </text>
                 </Show>
                 <Show when={linkedRetry()}>
@@ -1135,7 +1148,7 @@ function SupervisionPage(props: {
                       if (retry) reveal(retry.id)
                     }}
                   >
-                    View retry (Ctrl+V)
+                    View retry {ltrDirection("(Ctrl+V)")}
                   </text>
                 </Show>
               </box>
@@ -1180,7 +1193,7 @@ function SupervisionPage(props: {
         if (dragX === undefined || dragging === undefined) return
         const delta = event.x - dragX
         if (delta === 0) return
-        rememberLayout(dragging, dragging === "parents" ? delta : -delta)
+        rememberLayout(dragging, resizeDelta(dragging, delta, direction()))
         dragX = event.x
       }}
       onMouseDragEnd={() => {
@@ -1192,37 +1205,44 @@ function SupervisionPage(props: {
         dragging = undefined
       }}
     >
-      <box flexDirection="row" gap={1} flexShrink={0}>
+      <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
         <text fg={theme.text.default}>Delegation supervision</text>
         <text fg={freshness() === "live" ? theme.text.subdued : theme.text.feedback.warning.default}>
           {freshness() === "loading" ? "Loading" : freshness() === "live" ? "Live" : freshness() === "stale" ? "Stale" : "Degraded"}
         </text>
       </box>
-      <box flexDirection="row" gap={1} flexShrink={0}>
+      <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
         <text fg={theme.text.subdued} onMouseUp={searchHistory}>
-          Search: {search() || "all"} (Ctrl+F)
+          Search: {search() ? autoDirection(search()) : "all"} {ltrDirection("(Ctrl+F)")}
         </text>
         <text fg={theme.text.subdued} onMouseUp={() => setActionableOnly((value) => !value)}>
-          {actionableOnly() ? "actionable only" : "all states"} (Ctrl+A)
+          {actionableOnly() ? "actionable only" : "all states"} {ltrDirection("(Ctrl+A)")}
         </text>
         <text fg={theme.text.subdued} onMouseUp={() => synchronization.request()}>
-          Refresh (Ctrl+R)
+          Refresh {ltrDirection("(Ctrl+R)")}
         </text>
       </box>
       <Show when={freshness() !== "loading"}>
         <Show when={layout().composition === "medium"}>
           <text fg={theme.text.subdued} onMouseUp={selectParentDialog} truncate>
-            Parent: {selectedParentRecord()?.session.title ?? selectedParentRecord()?.session.id ?? "none"} |{" "}
-            {selectedParentRecord()?.counts.actionable ?? 0} actionable / {selectedParentRecord()?.counts.total ?? 0} retained
-            {" "}(select)
+            Parent:{" "}
+            {selectedParentRecord()?.session.title
+              ? autoDirection(selectedParentRecord()!.session.title!)
+              : selectedParentRecord()?.session.id
+                ? ltrDirection(selectedParentRecord()!.session.id)
+                : "none"}{" "}
+            | {ltrDirection(selectedParentRecord()?.counts.actionable ?? 0)} actionable /{" "}
+            {ltrDirection(selectedParentRecord()?.counts.total ?? 0)} retained (select)
           </text>
         </Show>
         <Show when={layout().composition === "narrow"}>
-          <box flexDirection="row" gap={1}>
+          <box flexDirection={rowDirection(direction())} gap={1}>
             <text fg={theme.text.subdued} onMouseUp={back}>
-              {stage() === "parents" ? "Back" : "< Back"}
+              {stage() === "parents" ? "Back" : direction() === "rtl" ? "> Back" : "< Back"}
             </text>
-            <text fg={theme.text.default}>{stage() === "parents" ? "Parents" : stage() === "timeline" ? "Timeline" : "Inspector"}</text>
+            <text fg={theme.text.default}>
+              {stage() === "parents" ? "Parents" : stage() === "timeline" ? "Timeline" : "Inspector"}
+            </text>
           </box>
         </Show>
       </Show>
@@ -1253,7 +1273,7 @@ function SupervisionPage(props: {
         <Match when={ready()}>
           <Switch>
             <Match when={layout().composition === "wide"}>
-              <box flexGrow={1} minHeight={0} minWidth={0} flexDirection="row">
+              <box flexGrow={1} minHeight={0} minWidth={0} flexDirection={rowDirection(direction())}>
                 <ParentPane />
                 <PaneSeparator kind="parents" />
                 <TimelinePane />
@@ -1262,7 +1282,7 @@ function SupervisionPage(props: {
               </box>
             </Match>
             <Match when={layout().composition === "medium"}>
-              <box flexGrow={1} minHeight={0} minWidth={0} flexDirection="row">
+              <box flexGrow={1} minHeight={0} minWidth={0} flexDirection={rowDirection(direction())}>
                 <TimelinePane />
                 <PaneSeparator kind="inspector" />
                 <InspectorPane />
@@ -1325,11 +1345,11 @@ export function timelineTrack(operation: ProjectedOperation, observedAt: number)
 
 export function operationInspector(operation: ProjectedOperation, observedAt: number) {
   return [
-    `Operation ${operation.id} (batch ${operation.batchID}, index ${operation.index})`,
-    `Parent ${operation.parentID}${operation.childID ? ` | Child ${operation.childID}` : ""}`,
-    `Agent ${operation.agent} | Model ${operation.model.providerID}/${operation.model.modelID}${operation.model.variant ? ` (${operation.model.variant})` : ""}`,
-    `State ${operation.presentationState} | Observed ${observedAt}`,
-    timelineTrack(operation, observedAt),
+    `Operation ${ltrDirection(operation.id)} (batch ${ltrDirection(operation.batchID)}, index ${ltrDirection(operation.index)})`,
+    `Parent ${ltrDirection(operation.parentID)}${operation.childID ? ` | Child ${ltrDirection(operation.childID)}` : ""}`,
+    `Agent ${ltrDirection(operation.agent)} | Model ${ltrDirection(`${operation.model.providerID}/${operation.model.modelID}`)}${operation.model.variant ? ` (${ltrDirection(operation.model.variant)})` : ""}`,
+    `State ${ltrDirection(operation.presentationState)} | Observed ${ltrDirection(observedAt)}`,
+    ltrDirection(timelineTrack(operation, observedAt)),
     ...(operation.timeline.executionEndSource
       ? [
           `Execution end: ${operation.timeline.executionEndSource === "startup_reconciliation" ? "uncertain startup reconciliation boundary" : "Session event"}`,
@@ -1337,15 +1357,15 @@ export function operationInspector(operation: ProjectedOperation, observedAt: nu
       : []),
     ...(operation.outcome
       ? [
-          `Outcome ${operation.outcome.state}: ${operation.outcome.reason.code}${operation.outcome.reason.detail ? ` - ${operation.outcome.reason.detail}` : ""}`,
+          `Outcome ${ltrDirection(operation.outcome.state)}: ${ltrDirection(operation.outcome.reason.code)}${operation.outcome.reason.detail ? ` - ${autoDirection(operation.outcome.reason.detail)}` : ""}`,
         ]
       : []),
     ...(operation.recovery
       ? [
-          `Recovery ${operation.recovery.episodeID} at ${operation.recovery.reconciledAt}: previous ${operation.recovery.previousState}, ${operation.recovery.eligible ? "eligible" : "resolved"}`,
+          `Recovery ${ltrDirection(operation.recovery.episodeID)} at ${ltrDirection(operation.recovery.reconciledAt)}: previous ${ltrDirection(operation.recovery.previousState)}, ${operation.recovery.eligible ? "eligible" : "resolved"}`,
         ]
       : []),
-    ...(operation.retryOfOperationID ? [`Retry of ${operation.retryOfOperationID}`] : []),
+    ...(operation.retryOfOperationID ? [`Retry of ${ltrDirection(operation.retryOfOperationID)}`] : []),
   ]
 }
 

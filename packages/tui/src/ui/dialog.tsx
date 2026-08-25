@@ -9,6 +9,7 @@ import { useClipboard } from "../context/clipboard"
 import { useConfig } from "../config"
 
 export type DialogSize = "medium" | "large" | "xlarge"
+export type Direction = "ltr" | "rtl"
 
 export function dialogWidth(size: DialogSize) {
   if (size === "xlarge") return 116
@@ -79,6 +80,7 @@ function init() {
     }[],
     size: "medium" as DialogSize,
     centered: false,
+    direction: "ltr" as Direction,
   })
 
   const renderer = useRenderer()
@@ -124,6 +126,7 @@ function init() {
           const current = store.stack.at(-1)
           current?.onClose?.()
           setStore("stack", store.stack.slice(0, -1))
+          if (store.stack.length === 0) setStore("direction", "ltr")
           refocus()
         },
       },
@@ -138,6 +141,7 @@ function init() {
           const current = store.stack.at(-1)
           current?.onClose?.()
           setStore("stack", store.stack.slice(0, -1))
+          if (store.stack.length === 0) setStore("direction", "ltr")
           refocus()
         },
       },
@@ -152,6 +156,7 @@ function init() {
       batch(() => {
         setStore("size", "medium")
         setStore("centered", false)
+        setStore("direction", "ltr")
         setStore("stack", [])
       })
       refocus()
@@ -185,6 +190,12 @@ function init() {
     get centered() {
       return store.centered
     },
+    get direction() {
+      return store.direction
+    },
+    get rowDirection() {
+      return store.direction === "rtl" ? ("row-reverse" as const) : ("row" as const)
+    },
     get key() {
       return store.stack.at(-1)?.key
     },
@@ -193,6 +204,9 @@ function init() {
     },
     setCentered(centered: boolean) {
       setStore("centered", centered)
+    },
+    setDirection(direction: Direction) {
+      setStore("direction", direction)
     },
   }
 }

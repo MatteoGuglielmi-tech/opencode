@@ -29,7 +29,7 @@ export function DialogAlert(props: DialogAlertProps) {
   }))
   return (
     <box paddingLeft={2} paddingRight={2} gap={1}>
-      <box flexDirection="row" justifyContent="space-between">
+      <box flexDirection={dialog.rowDirection} justifyContent="space-between">
         <text attributes={TextAttributes.BOLD} fg={theme.text.default}>
           {props.title}
         </text>
@@ -40,7 +40,11 @@ export function DialogAlert(props: DialogAlertProps) {
       <box paddingBottom={1}>
         <text fg={theme.text.subdued}>{props.message}</text>
       </box>
-      <box flexDirection="row" justifyContent="flex-end" paddingBottom={1}>
+      <box
+        flexDirection={dialog.rowDirection}
+        justifyContent="flex-end"
+        paddingBottom={1}
+      >
         <box
           paddingLeft={3}
           paddingRight={3}

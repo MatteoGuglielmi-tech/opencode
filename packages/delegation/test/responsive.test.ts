@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { autoDirection, directionFor, horizontalDelta, ltrDirection, resizeDelta, rowDirection } from "../src/direction"
 import { layoutFor, resizeLayout } from "../src/responsive"
 
 describe("Delegation supervision responsive layout", () => {
@@ -24,5 +25,25 @@ describe("Delegation supervision responsive layout", () => {
     expect(resizeLayout(initial, "parents", 5)).toMatchObject({ parents: 29, inspector: 36, timeline: 71 })
     expect(resizeLayout(initial, "inspector", 100)).toMatchObject({ parents: 24, inspector: 84, timeline: 28 })
     expect(resizeLayout(initial, "parents", -100)).toMatchObject({ parents: 18, inspector: 36, timeline: 82 })
+  })
+
+  test("maps physical horizontal input to logical RTL navigation and resizing", () => {
+    expect(horizontalDelta(-1, "ltr")).toBe(-1)
+    expect(horizontalDelta(-1, "rtl")).toBe(1)
+    expect(resizeDelta("parents", -5, "ltr")).toBe(-5)
+    expect(resizeDelta("parents", -5, "rtl")).toBe(5)
+    expect(resizeDelta("inspector", 5, "ltr")).toBe(-5)
+    expect(resizeDelta("inspector", 5, "rtl")).toBe(5)
+  })
+
+  test("keeps direction independent from content and isolates mixed text", () => {
+    expect(directionFor("rtl")).toBe("rtl")
+    expect(directionFor("ar")).toBe("ltr")
+    expect(rowDirection("ltr")).toBe("row")
+    expect(rowDirection("rtl")).toBe("row-reverse")
+    expect(autoDirection("English العربية")).toBe("\u2068English العربية\u2069")
+    expect(ltrDirection("ses_مرحبا /src/app.ts 12:34 openai/gpt-5")).toBe(
+      "\u2066ses_مرحبا /src/app.ts 12:34 openai/gpt-5\u2069",
+    )
   })
 })

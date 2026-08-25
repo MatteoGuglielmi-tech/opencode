@@ -361,7 +361,11 @@ describe("Delegation supervision workspace", () => {
     const calls: unknown[] = []
     const memory: PresentationMemory = { locations: {} }
     const layers: KeymapLayer[] = []
+    const options: { direction?: "rtl" } = {}
+    const dialogDirections: unknown[] = []
+    let promptValue = "nested"
     const context = {
+      options,
       location: { directory: "/repo" },
       renderer: { terminalWidth: 80, on() {}, off() {} },
       storage: { memory: () => [memory, (update: (draft: typeof memory) => void) => update(memory)] },
@@ -403,7 +407,13 @@ describe("Delegation supervision workspace", () => {
       },
       keymap: { layer: (input: () => KeymapLayer) => layers.push(input()) },
       ui: {
-        dialog: { clear() {}, prompt: async () => "nested" },
+        dialog: {
+          clear() {},
+          set(value: unknown) {
+            dialogDirections.push(value)
+          },
+          prompt: async () => promptValue,
+        },
         toast: { show() {} },
         tabs: { open: () => false },
         router: {
@@ -429,7 +439,8 @@ describe("Delegation supervision workspace", () => {
     })
     try {
       const medium = await app.waitForFrame(
-        (frame) => frame.includes("Parent: Parent") && frame.includes("2 actionable / 2 retained"),
+        (frame) =>
+          bidiPlain(frame).includes("Parent: Parent") && bidiPlain(frame).includes("2 actionable / 2 retained"),
       )
       expect(medium).toContain("Timeline")
       expect(medium).toContain("Inspector")
@@ -444,20 +455,20 @@ describe("Delegation supervision workspace", () => {
       ])
       const commands = new Map(layers.flatMap((layer) => layer.commands ?? []).map((command) => [command.id, command]))
       await app.mockMouse.click(3, 7)
-      await app.waitForFrame((frame) => frame.includes("index 0"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("index 0"))
       await app.mockMouse.click(3, 10)
-      await app.waitForFrame((frame) => frame.includes("index 1"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("index 1"))
       commands.get("delegation.supervision.navigation.previous")?.run()
-      await app.waitForFrame((frame) => frame.includes("index 0"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("index 0"))
       commands.get("delegation.supervision.navigation.next")?.run()
-      await app.waitForFrame((frame) => frame.includes("index 1"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("index 1"))
       commands.get("delegation.supervision.scroll.page-down")?.run()
       commands.get("delegation.supervision.scroll.page-up")?.run()
       const search = layers
         .flatMap((layer) => layer.commands ?? [])
         .find((command) => command.id === "delegation.supervision.filter.search")
       await search?.run()
-      await app.waitForFrame((frame) => frame.includes("Search: nested"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("Search: nested"))
 
       expect([...commands.keys()]).toEqual(
         expect.arrayContaining([
@@ -522,17 +533,26 @@ describe("Delegation supervision workspace", () => {
       await app.mockMouse.drag(parentsSeparatorX, wideY, parentsSeparatorX + 3, wideY)
       await app.renderOnce()
       expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(27)
+      commands.get("delegation.supervision.navigation.right")?.run()
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(29)
+      const inspectorSeparatorX = app.captureCharFrame().split("\n")[wideY].lastIndexOf("│")
+      await app.mockMouse.drag(inspectorSeparatorX, wideY, inspectorSeparatorX - 3, wideY)
+      commands.get("delegation.supervision.navigation.right")?.run()
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(37)
       expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(39)
 
       app.resize(70, 24)
       await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
       app.resize(50, 16)
-      const minimum = await app.waitForFrame((frame) => frame.includes("Timeline") && frame.includes("nested [terminal]"))
+      const minimum = await app.waitForFrame(
+        (frame) => frame.includes("Timeline") && bidiPlain(frame).includes("nested [terminal]"),
+      )
       expect(minimum.split("\n")).toHaveLength(17)
     } finally {
       app.renderer.destroy()
     }
 
+    options.direction = "rtl"
     void TuiPlugin.setup(context)
     if (!page) throw new Error("expected reloaded supervision page")
     const reloaded = page
@@ -544,12 +564,99 @@ describe("Delegation supervision workspace", () => {
       },
     )
     try {
-      await restored.waitForFrame((frame) => frame.includes("Search: nested"))
+      const rtlMedium = await restored.waitForFrame((frame) => bidiPlain(frame).includes("Search: nested"))
+      const mediumHeader = rtlMedium
+        .split("\n")
+        .find((line) => line.includes("Timeline") && line.includes("Inspector"))!
+      expect(mediumHeader.indexOf("Inspector")).toBeLessThan(mediumHeader.indexOf("Timeline"))
+      const rtlCommands = new Map(
+        layers.flatMap((layer) => layer.commands ?? []).map((command) => [command.id, command]),
+      )
+      promptValue = ""
+      await rtlCommands.get("delegation.supervision.filter.search")?.run()
+      await restored.waitForFrame((frame) => bidiPlain(frame).includes("Search: all"))
+      expect(dialogDirections.at(-1)).toEqual({ direction: "rtl" })
+      rtlCommands.get("delegation.supervision.focus.next")?.run()
+      rtlCommands.get("delegation.supervision.focus.next")?.run()
+      rtlCommands.get("delegation.supervision.navigation.left")?.run()
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(37)
+      const mediumSeparatorX = mediumHeader.indexOf("│")
+      await restored.mockMouse.drag(mediumSeparatorX, 4, mediumSeparatorX + 3, 4)
+      await restored.renderOnce()
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(40)
+
+      restored.resize(140, 40)
+      const rtlWide = await restored.waitForFrame(
+        (frame) => frame.includes("Parents") && frame.includes("Timeline") && frame.includes("Inspector"),
+      )
+      const wideHeader = rtlWide.split("\n").find((line) => line.includes("Parents") && line.includes("Timeline"))!
+      expect(wideHeader.indexOf("Inspector")).toBeLessThan(wideHeader.indexOf("Timeline"))
+      expect(wideHeader.indexOf("Timeline")).toBeLessThan(wideHeader.indexOf("Parents"))
+      expect(rtlWide).toContain("\u2068Parent\u2069")
+      expect(rtlWide).toContain("Model \u2066openai/gpt-")
+      expect(rtlWide).toContain("State \u2066terminal\u2069 | Observed")
+      expect(rtlWide).toMatch(/\u2066\d{10,}\u2069/)
+      expect(rtlWide).toContain("Parent \u2066ses_nested\u2069")
+      ;(fixture.sessions[0] as { title?: string }).title = "الوالد Parent"
+      await rtlCommands.get("delegation.supervision.refresh")?.run()
+      await restored.waitForFrame((frame) => frame.includes("\u2068الوالد Parent\u2069"))
+      ;(fixture.sessions[0] as { title?: string }).title = "الوالد"
+      await rtlCommands.get("delegation.supervision.refresh")?.run()
+      await restored.waitForFrame((frame) => frame.includes("\u2068الوالد\u2069"))
+      const parentSeparatorX = wideHeader.lastIndexOf("│")
+      await restored.mockMouse.click(parentSeparatorX, 4)
+      rtlCommands.get("delegation.supervision.navigation.left")?.run()
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(31)
+      await restored.renderOnce()
+      const resizedParentSeparatorX = restored
+        .captureCharFrame()
+        .split("\n")
+        .find((line) => line.includes("Parents") && line.includes("Timeline"))!
+        .lastIndexOf("┃")
+      await restored.mockMouse.drag(resizedParentSeparatorX, 4, resizedParentSeparatorX - 3, 4)
+      await restored.renderOnce()
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(34)
+      const inspectorSeparatorX = restored
+        .captureCharFrame()
+        .split("\n")
+        .find((line) => line.includes("Parents") && line.includes("Timeline"))!
+        .indexOf("│")
+      await restored.mockMouse.drag(inspectorSeparatorX, 4, inspectorSeparatorX + 3, 4)
+      await restored.renderOnce()
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(40)
+      rtlCommands.get("delegation.supervision.navigation.left")?.run()
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(38)
+      rtlCommands.get("delegation.supervision.scroll.page-down")?.run()
+      rtlCommands.get("delegation.supervision.scroll.page-up")?.run()
+
+      restored.resize(70, 24)
+      await restored.waitForFrame((frame) => frame.includes("Parents") && !frame.includes("Inspector"))
+      rtlCommands.get("delegation.supervision.child.open")?.run()
+      await restored.waitForFrame((frame) => frame.includes("> Back") && frame.includes("Timeline"))
+      rtlCommands.get("delegation.supervision.child.open")?.run()
+      restored.resize(50, 16)
+      const inspectorStart = await restored.waitForFrame(
+        (frame) => frame.includes("> Back") && frame.includes("Inspector") && frame.includes("Operation"),
+      )
+      rtlCommands.get("delegation.supervision.scroll.page-down")?.run()
+      await restored.renderOnce()
+      expect(restored.captureCharFrame()).not.toBe(inspectorStart)
+      rtlCommands.get("delegation.supervision.scroll.page-up")?.run()
+      await restored.renderOnce()
+      expect(restored.captureCharFrame()).toBe(inspectorStart)
+      rtlCommands.get("delegation.supervision.back")?.run()
+      await restored.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
+      rtlCommands.get("delegation.supervision.back")?.run()
+      await restored.waitForFrame((frame) => frame.includes("Parents") && !frame.includes("> Back"))
     } finally {
       restored.renderer.destroy()
     }
   })
 })
+
+function bidiPlain(value: string) {
+  return value.replaceAll(/[\u2066\u2068\u2069]/g, "")
+}
 
 async function workspace() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "opencode-delegation-workspace-"))

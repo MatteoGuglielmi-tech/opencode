@@ -579,7 +579,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     const disabled = createMemo(() => isActionDisabled(item))
     return (
       <box
-        flexDirection="row"
+        flexDirection={dialog.rowDirection}
         backgroundColor={active() ? theme.background.action.primary.focused : RGBA.fromInts(0, 0, 0, 0)}
         onMouseUp={() => trigger(item)}
       >
@@ -613,7 +613,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   return (
     <box gap={1} paddingBottom={1} flexGrow={1}>
       <box paddingLeft={4} paddingRight={4}>
-        <box flexDirection="row" justifyContent="space-between">
+        <box flexDirection={dialog.rowDirection} justifyContent="space-between">
           {props.titleView ?? (
             <text fg={theme.text.default} attributes={TextAttributes.BOLD}>
               {props.title}
@@ -686,7 +686,11 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
               {([category, options], index) => (
                 <>
                   <Show when={category}>
-                    <box paddingTop={index() > 0 ? 1 : 0} paddingLeft={3}>
+                    <box
+                      paddingTop={index() > 0 ? 1 : 0}
+                      paddingLeft={dialog.direction === "rtl" ? 0 : 3}
+                      paddingRight={dialog.direction === "rtl" ? 3 : 0}
+                    >
                       <Show
                         when={options[0]?.categoryView}
                         fallback={
@@ -732,9 +736,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                           }}
                         >
                           <box
-                            flexDirection="row"
-                            paddingLeft={current() || option.gutter ? 1 : 3}
-                            paddingRight={3}
+                            flexDirection={dialog.rowDirection}
+                            paddingLeft={dialog.direction === "rtl" ? 3 : current() || option.gutter ? 1 : 3}
+                            paddingRight={dialog.direction === "rtl" ? (current() || option.gutter ? 1 : 3) : 3}
                             gap={1}
                             backgroundColor={
                               active()
@@ -745,7 +749,12 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                             }
                           >
                             <Show when={!current() && option.margin}>
-                              <box position="absolute" left={1} flexShrink={0}>
+                              <box
+                                position="absolute"
+                                left={dialog.direction === "rtl" ? undefined : 1}
+                                right={dialog.direction === "rtl" ? 1 : undefined}
+                                flexShrink={0}
+                              >
                                 {option.margin}
                               </box>
                             </Show>
@@ -791,12 +800,18 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
         </Show>
       </box>
       <Show when={props.footer || visibleActions().length} fallback={<box flexShrink={0} />}>
-        <box paddingRight={2} paddingLeft={4} flexDirection="row" justifyContent="space-between" flexShrink={0}>
-          <box flexDirection="row" gap={2}>
+        <box
+          paddingRight={dialog.direction === "rtl" ? 4 : 2}
+          paddingLeft={dialog.direction === "rtl" ? 2 : 4}
+          flexDirection={dialog.rowDirection}
+          justifyContent="space-between"
+          flexShrink={0}
+        >
+          <box flexDirection={dialog.rowDirection} gap={2}>
             {props.footer}
             <For each={left()}>{(item) => <FooterAction item={item} />}</For>
           </box>
-          <box flexDirection="row" gap={2}>
+          <box flexDirection={dialog.rowDirection} gap={2}>
             <For each={right()}>{(item) => <FooterAction item={item} />}</For>
           </box>
         </box>
@@ -821,6 +836,7 @@ function Option(props: {
   onMouseOver?: () => void
 }) {
   const theme = useTheme("elevated")
+  const dialog = useDialog()
   const text = createMemo(() => {
     if (props.active && !props.muted) return props.activeColor ?? theme.text.action.primary.focused
     if (props.muted && (props.active || props.current)) return theme.text.subdued
@@ -846,7 +862,8 @@ function Option(props: {
         attributes={props.active && !props.muted ? TextAttributes.BOLD : undefined}
         overflow="hidden"
         wrapMode="none"
-        paddingLeft={3}
+        paddingLeft={dialog.direction === "rtl" ? 0 : 3}
+        paddingRight={dialog.direction === "rtl" ? 3 : 0}
       >
         {props.titleView ??
           (props.truncateTitle === false

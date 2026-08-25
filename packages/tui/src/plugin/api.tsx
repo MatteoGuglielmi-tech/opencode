@@ -241,6 +241,7 @@ function createDialogApi(dialog: ReturnType<typeof useDialog>, provide: (render:
     set(options) {
       dialog.setSize(options.size ?? "medium")
       dialog.setCentered(options.centered ?? false)
+      dialog.setDirection(options.direction ?? "ltr")
     },
     clear() {
       dialog.clear()

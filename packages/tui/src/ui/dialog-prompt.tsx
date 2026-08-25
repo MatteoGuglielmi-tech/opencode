@@ -74,7 +74,7 @@ export function DialogPrompt(props: DialogPromptProps) {
 
   return (
     <box paddingLeft={2} paddingRight={2} gap={1}>
-      <box flexDirection="row" justifyContent="space-between">
+      <box flexDirection={dialog.rowDirection} justifyContent="space-between">
         <text attributes={TextAttributes.BOLD} fg={theme.text.default}>
           {props.title}
         </text>
@@ -103,7 +103,7 @@ export function DialogPrompt(props: DialogPromptProps) {
           <Spinner color={theme.text.subdued}>{props.busyText ?? "Working..."}</Spinner>
         </Show>
       </box>
-      <box paddingBottom={1} gap={1} flexDirection="row">
+      <box paddingBottom={1} gap={1} flexDirection={dialog.rowDirection}>
         <Show when={!props.busy} fallback={<text fg={theme.text.subdued}>processing...</text>}>
           <Show when={shortcuts.get("dialog.prompt.submit")}>
             <text fg={theme.text.default}>

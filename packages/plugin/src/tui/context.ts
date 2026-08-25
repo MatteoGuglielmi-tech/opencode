@@ -296,10 +296,12 @@ export interface Attention {
 }
 
 export type DialogSize = "medium" | "large" | "xlarge"
+export type Direction = "ltr" | "rtl"
 
 export interface DialogOptions {
   readonly size?: DialogSize
   readonly centered?: boolean
+  readonly direction?: Direction
 }
 
 export interface DialogAlertOptions {

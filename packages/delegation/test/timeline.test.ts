@@ -7,6 +7,7 @@ import { decode } from "../src/config"
 import { initialize, open, type Store } from "../src/storage"
 import { projectWorkspace } from "../src/supervision"
 import { operationInspector, timelineTrack } from "../src/tui"
+import { ltrDirection } from "../src/direction"
 
 describe("Delegation operation timelines", () => {
   test("retains immutable milestones, aggregate permission waits, Finalizing, and Terminal truth", async () => {
@@ -302,7 +303,7 @@ describe("Delegation operation timelines", () => {
         expect.stringContaining(operation.id),
         expect.stringContaining("parent-a"),
         expect.stringContaining("openai/gpt-5"),
-        expect.stringContaining("Observed 30"),
+        expect.stringContaining(`Observed ${ltrDirection(30)}`),
         expect.stringContaining("setup_failed"),
       ]),
     )

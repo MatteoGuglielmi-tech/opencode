@@ -19,23 +19,32 @@ async function renderSelect(
   onGlobal: () => void,
   onRow: (option: DialogSelectOption<string>) => void,
   current?: string,
+  direction: "ltr" | "rtl" = "ltr",
 ) {
   const state = path.join(root, "state")
   await mkdir(state, { recursive: true })
   const config = createTuiResolvedConfig()
-  const [{ ConfigProvider }, { ThemeProvider }, { Keymap }, { DialogProvider }, { DialogSelect }, { ToastProvider }] =
-    await Promise.all([
-      import("../../../src/config"),
-      import("../../../src/context/theme"),
-      import("../../../src/context/keymap"),
-      import("../../../src/ui/dialog"),
-      import("../../../src/ui/dialog-select"),
-      import("../../../src/ui/toast"),
-    ])
+  const [
+    { ConfigProvider },
+    { ThemeProvider },
+    { Keymap },
+    { DialogProvider, useDialog },
+    { DialogSelect },
+    { ToastProvider },
+  ] = await Promise.all([
+    import("../../../src/config"),
+    import("../../../src/context/theme"),
+    import("../../../src/context/keymap"),
+    import("../../../src/ui/dialog"),
+    import("../../../src/ui/dialog-select"),
+    import("../../../src/ui/toast"),
+  ])
 
   function Harness() {
     function Select() {
+      const dialog = useDialog()
       onCleanup(Keymap.use().mode.push("modal"))
+      onMount(() => dialog.setDirection(direction))
       return (
         <DialogSelect
           title="Items"
@@ -161,6 +170,26 @@ async function mountSelect(
 test("budgets option content for constrained and full-width large dialogs", () => {
   expect(dialogSelectContentWidth(Math.min(dialogWidth("large"), 62 - 2)) - 7).toBe(41)
   expect(dialogSelectContentWidth(Math.min(dialogWidth("large"), 100 - 2)) - 7).toBe(69)
+})
+
+test("mirrors dialog selector rows when presentation direction is RTL", async () => {
+  await using tmp = await tmpdir()
+  const app = await renderSelect(
+    tmp.path,
+    [{ title: "English العربية", value: "mixed" }],
+    () => {},
+    () => {},
+    "mixed",
+    "rtl",
+  )
+
+  try {
+    const frame = await app.waitForFrame((value) => value.includes("English العربية"))
+    const header = frame.split("\n").find((line) => line.includes("Items") && line.includes("esc"))!
+    expect(header.indexOf("esc")).toBeLessThan(header.indexOf("Items"))
+  } finally {
+    app.renderer.destroy()
+  }
 })
 
 test("renders the complete truncated footer within the option row", async () => {
