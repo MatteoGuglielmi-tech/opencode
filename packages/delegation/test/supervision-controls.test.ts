@@ -3,6 +3,7 @@ import {
   batchCancellationCounts,
   createSupervisionControls,
   operationControls,
+  recoveryControls,
   type SupervisionControlAction,
 } from "../src/supervision-controls"
 import type { ProjectedOperation } from "../src/supervision"
@@ -41,6 +42,77 @@ describe("Delegation supervision controls", () => {
       terminal: 1,
       targets: ["dop_run", "dop_pending", "dop_finalizing"],
     })
+  })
+
+  test("offers mutually exclusive recovery choices only while authoritative eligibility remains", () => {
+    const eligible = operation("terminal", {
+      recovery: { episodeID: "rcv_one", reconciledAt: 4, previousState: "running", eligible: true },
+    })
+
+    expect(recoveryControls(eligible)).toEqual({ retry: true, dismiss: true })
+    expect(recoveryControls(eligible, true)).toEqual({ retry: false, dismiss: false })
+    expect(
+      recoveryControls({
+        ...eligible,
+        recovery: { ...eligible.recovery!, eligible: false },
+      }),
+    ).toEqual({ retry: false, dismiss: false })
+    expect(recoveryControls(operation("terminal"))).toEqual({ retry: false, dismiss: false })
+  })
+
+  test("submits retry and dismiss as separate stable Control episodes", async () => {
+    const calls: Array<{ parentID: string; invocationID: string; arguments: string }> = []
+    const identities = ["ctl_retry", "ctl_dismiss"]
+    const controls = createSupervisionControls({
+      invocationID: () => identities.shift()!,
+      invoke: async (input) => calls.push(input),
+      reconcile: async () => {},
+      publish() {},
+    })
+
+    expect(
+      await controls.submit({
+        action: { type: "retry", parentID: "ses_parent", operationID: "dop_retry" },
+        operationIDs: ["dop_retry"],
+      }),
+    ).toEqual({ status: "committed", invocationID: "ctl_retry" })
+    expect(
+      await controls.submit({
+        action: { type: "dismiss-recovery", parentID: "ses_parent", operationID: "dop_dismiss" },
+        operationIDs: ["dop_dismiss"],
+      }),
+    ).toEqual({ status: "committed", invocationID: "ctl_dismiss" })
+    expect(calls).toEqual([
+      { parentID: "ses_parent", invocationID: "ctl_retry", arguments: "action=retry operation=dop_retry" },
+      { parentID: "ses_parent", invocationID: "ctl_dismiss", arguments: "action=dismiss operation=dop_dismiss" },
+    ])
+  })
+
+  test("keeps one retry identity through uncertain delivery and blocks Dismiss", async () => {
+    const calls: string[] = []
+    const controls = createSupervisionControls({
+      invocationID: () => "ctl_retry",
+      invoke: async (input) => {
+        calls.push(input.invocationID)
+        throw new Error("transport disconnected")
+      },
+      reconcile: async () => {},
+      publish() {},
+    })
+
+    expect(
+      await controls.submit({
+        action: { type: "retry", parentID: "ses_parent", operationID: "dop_one" },
+        operationIDs: ["dop_one"],
+      }),
+    ).toMatchObject({ status: "uncertain", invocationID: "ctl_retry" })
+    expect(
+      await controls.submit({
+        action: { type: "dismiss-recovery", parentID: "ses_parent", operationID: "dop_one" },
+        operationIDs: ["dop_one"],
+      }),
+    ).toEqual({ status: "blocked", invocationID: "ctl_retry" })
+    expect(calls).toEqual(["ctl_retry", "ctl_retry"])
   })
 
   test("reuses one invocation identity after uncertain transport and marks only submitted targets", async () => {
@@ -167,7 +239,7 @@ describe("Delegation supervision controls", () => {
       invocationID: () => "ctl_race",
       invoke: async (input) => {
         calls.push(input.invocationID)
-        throw { _tag: "CommandEvaluationError", message: "[control_invalid] Delegation operation is not running" }
+        throw { _tag: "CommandEvaluationError", message: "[control_invalid] recovery eligibility was consumed" }
       },
       reconcile: async () => {
         reconciled++
@@ -177,13 +249,13 @@ describe("Delegation supervision controls", () => {
 
     expect(
       await controls.submit({
-        action: { type: "steer", parentID: "ses_parent", operationID: "dop_one", text: "focus" },
+        action: { type: "retry", parentID: "ses_parent", operationID: "dop_one" },
         operationIDs: ["dop_one"],
       }),
     ).toEqual({
       status: "reconciled",
       invocationID: "ctl_race",
-      detail: "[control_invalid] Delegation operation is not running",
+      detail: "[control_invalid] recovery eligibility was consumed",
     })
     expect(calls).toEqual(["ctl_race"])
     expect(reconciled).toBe(1)
@@ -253,11 +325,7 @@ function operation(
   extra: Partial<ProjectedOperation> = {},
 ): ProjectedOperation {
   const internalState =
-    presentationState === "terminal"
-      ? "completed"
-      : presentationState === "finalizing"
-        ? "running"
-        : presentationState
+    presentationState === "terminal" ? "completed" : presentationState === "finalizing" ? "running" : presentationState
   return {
     id: "dop_one",
     batchID: "dlg_batch",

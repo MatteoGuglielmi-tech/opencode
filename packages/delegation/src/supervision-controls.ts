@@ -6,6 +6,8 @@ export type SupervisionControlAction =
   | Readonly<{ type: "cancel-operation"; parentID: string; operationID: string }>
   | Readonly<{ type: "cancel-batch"; parentID: string; batchID: string }>
   | Readonly<{ type: "steer"; parentID: string; operationID: string; text: string }>
+  | Readonly<{ type: "retry"; parentID: string; operationID: string }>
+  | Readonly<{ type: "dismiss-recovery"; parentID: string; operationID: string }>
 
 export type PendingSupervisionControl = Readonly<{
   invocationID: string
@@ -31,6 +33,11 @@ export function operationControls(operation: ProjectedOperation, pending = false
     cancel: cancellable && !blocked,
     steer: active && operation.childID !== undefined && !blocked,
   }
+}
+
+export function recoveryControls(operation: ProjectedOperation, pending = false) {
+  const eligible = operation.recovery?.eligible === true && !pending
+  return { retry: eligible, dismiss: eligible }
 }
 
 export function batchCancellationCounts(operations: ReadonlyArray<ProjectedOperation>) {
@@ -76,10 +83,11 @@ export function createSupervisionControls(input: {
       arguments: argumentsFor(control.action),
     })
 
-  const reconcile = () => input.reconcile().then(
-    () => true,
-    () => false,
-  )
+  const reconcile = () =>
+    input.reconcile().then(
+      () => true,
+      () => false,
+    )
 
   const settle = async (control: PendingSupervisionControl, retry: boolean): Promise<SupervisionControlResult> => {
     const outcome = await invoke(control).then(
@@ -144,20 +152,22 @@ export function createSupervisionControls(input: {
           attempting.add(control.invocationID)
           if (control.status === "reconciling")
             return [
-              reconcile().then((reconciled): SupervisionControlResult => {
-                if (!reconciled)
+              reconcile()
+                .then((reconciled): SupervisionControlResult => {
+                  if (!reconciled)
+                    return {
+                      status: "uncertain",
+                      invocationID: control.invocationID,
+                      detail: "Awaiting authoritative reconciliation",
+                    }
+                  clear(control)
                   return {
-                    status: "uncertain",
+                    status: "reconciled",
                     invocationID: control.invocationID,
-                    detail: "Awaiting authoritative reconciliation",
+                    detail: "Eligibility changed before the Control committed",
                   }
-                clear(control)
-                return {
-                  status: "reconciled",
-                  invocationID: control.invocationID,
-                  detail: "Eligibility changed before the Control committed",
-                }
-              }).finally(() => attempting.delete(control.invocationID)),
+                })
+                .finally(() => attempting.delete(control.invocationID)),
             ]
           return [settle(control, false).finally(() => attempting.delete(control.invocationID))]
         }),
@@ -171,7 +181,8 @@ export function createSupervisionControls(input: {
 function argumentsFor(action: SupervisionControlAction) {
   if (action.type === "cancel-operation") return `action=cancel operation=${action.operationID}`
   if (action.type === "cancel-batch") return `action=cancel batch=${action.batchID}`
-  return `action=steer operation=${action.operationID} ${action.text}`
+  if (action.type === "steer") return `action=steer operation=${action.operationID} ${action.text}`
+  return `action=${action.type === "retry" ? "retry" : "dismiss"} operation=${action.operationID}`
 }
 
 function classify(detail: string): "conflict" | "race" | "defect" | "uncertain" {

@@ -17,12 +17,16 @@ import {
   batchCancellationCounts,
   createSupervisionControls,
   operationControls,
+  recoveryControls,
   type PendingSupervisionControl,
+  type SupervisionControlAction,
   type SupervisionControlResult,
 } from "./supervision-controls.js"
 import {
   locationIdentity,
   reconcilePresentationState,
+  revealOperation,
+  retryForOperation,
   sanitizePresentationState,
   type PresentationMemory,
   type PresentationState,
@@ -184,6 +188,13 @@ function SupervisionPage(props: {
   })
   const pendingFor = (operationID: string) =>
     pendingControls().find((control) => control.operationIDs.includes(operationID))
+  const recoveryEnabled = (operation: ProjectedOperation, action: "retry" | "dismiss") =>
+    synchronization.mutationsEnabled() && recoveryControls(operation, Boolean(pendingFor(operation.id)))[action]
+  const linkedRetry = createMemo(() => {
+    const operation = selectedOperation()
+    const result = current()
+    return !operation || result?.type !== "workspace" ? undefined : retryForOperation(result.parents, operation.id)
+  })
   const health = createMemo(() => {
     const result = current()
     if (result?.type === "workspace" && result.health.status === "degraded") return result.health
@@ -274,9 +285,11 @@ function SupervisionPage(props: {
       return false
     }
     if (result.status === "reconciled") {
-      const state = ready()
-        ?.parents.flatMap((parent) => parent.operations)
-        .find((operation) => operation.id === operationID)?.presentationState ?? "unavailable"
+      const result = current()
+      const state =
+        (result?.type === "workspace" ? result.parents : [])
+          .flatMap((parent) => parent.operations)
+          .find((operation) => operation.id === operationID)?.presentationState ?? "unavailable"
       props.context.ui.toast.show({
         variant: "info",
         message: `Control was not applied; the operation is now ${state}.`,
@@ -296,6 +309,31 @@ function SupervisionPage(props: {
     })
     return false
   }
+  const reveal = (operationID: string) => {
+    const result = current()
+    if (result?.type !== "workspace") return
+    const revealed = revealOperation(
+      {
+        ...presentation,
+        filters: { search: search(), actionableOnly: actionableOnly() },
+        selectedParentID: selectedParentID(),
+        selectedOperationID: selectedOperationID(),
+      },
+      result.parents,
+      operationID,
+    )
+    batch(() => {
+      setSearch(revealed.state.filters.search)
+      setActionableOnly(revealed.state.filters.actionableOnly)
+      setSelectedParentID(revealed.state.selectedParentID)
+      setSelectedOperationID(revealed.state.selectedOperationID)
+    })
+    if (revealed.adjustedFilters.length === 0) return
+    props.context.ui.toast.show({
+      variant: "info",
+      message: `Adjusted ${revealed.adjustedFilters.join(" and ")} filters to reveal this operation.`,
+    })
+  }
   createEffect(() => {
     const result = current()
     if (result?.type !== "workspace" || freshness() !== "live" || result.generation === confirmedGeneration()) return
@@ -306,15 +344,27 @@ function SupervisionPage(props: {
       results.forEach((control) => {
         if (control.status === "uncertain") return
         const action = unresolved.find((candidate) => candidate.invocationID === control.invocationID)?.action
-        const committed = action?.type === "steer" ? "Guidance committed." : "Cancellation requested."
-        if (!reportControl(control, committed, action && "operationID" in action ? action.operationID : undefined) || action?.type !== "steer") return
+        if (
+          !reportControl(
+            control,
+            controlCommittedMessage(action),
+            action && "operationID" in action ? action.operationID : undefined,
+          )
+        )
+          return
+        if (action?.type === "retry") reveal(action.operationID)
+        if (action?.type !== "steer") return
         setSteerDrafts((drafts) => ({ ...drafts, [action.operationID]: "" }))
       }),
     )
   })
   const cancelOperation = async () => {
     const operation = selectedOperation()
-    if (!operation || !synchronization.mutationsEnabled() || !operationControls(operation, Boolean(pendingFor(operation.id))).cancel)
+    if (
+      !operation ||
+      !synchronization.mutationsEnabled() ||
+      !operationControls(operation, Boolean(pendingFor(operation.id))).cancel
+    )
       return
     const complete = synchronization.trackAction()
     const result = await controls
@@ -377,7 +427,11 @@ function SupervisionPage(props: {
   }
   const steerOperation = async () => {
     const operation = selectedOperation()
-    if (!operation || !synchronization.mutationsEnabled() || !operationControls(operation, Boolean(pendingFor(operation.id))).steer)
+    if (
+      !operation ||
+      !synchronization.mutationsEnabled() ||
+      !operationControls(operation, Boolean(pendingFor(operation.id))).steer
+    )
       return
     const text = await props.context.ui.dialog.prompt({
       title: "Steer child Session",
@@ -396,6 +450,61 @@ function SupervisionPage(props: {
       .finally(complete)
     if (!reportControl(result, "Guidance committed.", operation.id)) return
     setSteerDrafts((drafts) => ({ ...drafts, [operation.id]: "" }))
+  }
+  const retryOperation = async () => {
+    const operation = selectedOperation()
+    if (!operation || !recoveryEnabled(operation, "retry")) return
+    const complete = synchronization.trackAction()
+    if (
+      !reportControl(
+        await controls
+          .submit({
+            action: { type: "retry", parentID: operation.parentID, operationID: operation.id },
+            operationIDs: [operation.id],
+          })
+          .finally(complete),
+        "Retry admitted.",
+        operation.id,
+      )
+    )
+      return
+    reveal(operation.id)
+  }
+  const dismissRecovery = async () => {
+    const operation = selectedOperation()
+    if (!operation || !recoveryEnabled(operation, "dismiss")) return
+    const confirmed = await props.context.ui.dialog.confirm({
+      title: "Dismiss recovery",
+      message:
+        "Permanently consume this operation's recovery eligibility? The operation, timeline, Recovery notice, and child Session remain retained.",
+      label: { confirm: "Dismiss recovery" },
+    })
+    if (!confirmed) return
+    await synchronization.reconcile()
+    if (!synchronization.mutationsEnabled()) return
+    const latest = current()
+    const candidate =
+      latest?.type === "workspace"
+        ? latest.parents.flatMap((parent) => parent.operations).find((item) => item.id === operation.id)
+        : undefined
+    if (!candidate || !recoveryEnabled(candidate, "dismiss")) {
+      props.context.ui.toast.show({
+        variant: "info",
+        message: "Recovery eligibility changed; no dismissal was applied.",
+      })
+      return
+    }
+    const complete = synchronization.trackAction()
+    reportControl(
+      await controls
+        .submit({
+          action: { type: "dismiss-recovery", parentID: candidate.parentID, operationID: candidate.id },
+          operationIDs: [candidate.id],
+        })
+        .finally(complete),
+      "Recovery dismissed.",
+      candidate.id,
+    )
   }
   const theme = props.context.theme
 
@@ -474,6 +583,36 @@ function SupervisionPage(props: {
           )
         },
         run: steerOperation,
+      },
+      {
+        id: "delegation.supervision.operation.retry",
+        title: "Retry recovered operation",
+        bind: "ctrl+t",
+        enabled: () => {
+          const operation = selectedOperation()
+          return Boolean(operation && recoveryEnabled(operation, "retry"))
+        },
+        run: retryOperation,
+      },
+      {
+        id: "delegation.supervision.recovery.dismiss",
+        title: "Dismiss recovery",
+        bind: "ctrl+d",
+        enabled: () => {
+          const operation = selectedOperation()
+          return Boolean(operation && recoveryEnabled(operation, "dismiss"))
+        },
+        run: dismissRecovery,
+      },
+      {
+        id: "delegation.supervision.retry.view",
+        title: "View retry",
+        bind: "ctrl+v",
+        enabled: () => Boolean(linkedRetry()),
+        run() {
+          const retry = linkedRetry()
+          if (retry) reveal(retry.id)
+        },
       },
       {
         id: "delegation.supervision.filter.search",
@@ -595,7 +734,9 @@ function SupervisionPage(props: {
                   <text fg={theme.text.subdued}>Open child Session (Enter)</text>
                 </Show>
                 <Show when={pendingFor(operation().id)}>
-                  <text fg={theme.text.feedback.warning.default}>Control confirming; lifecycle remains authoritative.</text>
+                  <text fg={theme.text.feedback.warning.default}>
+                    Control confirming; lifecycle remains authoritative.
+                  </text>
                 </Show>
                 <Show
                   when={
@@ -622,6 +763,12 @@ function SupervisionPage(props: {
                 >
                   <text fg={theme.text.subdued}>Steer child Session (Ctrl+S)</text>
                 </Show>
+                <Show when={recoveryEnabled(operation(), "retry")}>
+                  <text fg={theme.text.subdued}>Retry (Ctrl+T) | Dismiss recovery (Ctrl+D)</text>
+                </Show>
+                <Show when={linkedRetry()}>
+                  <text fg={theme.text.subdued}>View retry (Ctrl+V)</text>
+                </Show>
               </box>
             )}
           </Show>
@@ -629,6 +776,13 @@ function SupervisionPage(props: {
       </Switch>
     </box>
   )
+}
+
+function controlCommittedMessage(action: SupervisionControlAction | undefined) {
+  if (action?.type === "steer") return "Guidance committed."
+  if (action?.type === "retry") return "Retry admitted."
+  if (action?.type === "dismiss-recovery") return "Recovery dismissed."
+  return "Cancellation requested."
 }
 
 export function timelineTrack(operation: ProjectedOperation, observedAt: number) {

@@ -86,8 +86,26 @@ export function reconcilePresentationState(
   parents: ReadonlyArray<ParentSummary>,
   entrySessionID?: string,
 ) {
+  return reconcileSelection(input, parents, entrySessionID ? explicitSelection(parents, entrySessionID) : undefined)
+}
+
+export function revealOperation(input: PresentationState, parents: ReadonlyArray<ParentSummary>, operationID: string) {
+  const parent = parents.find((candidate) => candidate.operations.some((operation) => operation.id === operationID))
+  return reconcileSelection(input, parents, parent ? { parentID: parent.session.id, operationID } : undefined)
+}
+
+export function retryForOperation(parents: ReadonlyArray<ParentSummary>, operationID: string) {
+  return parents
+    .flatMap((parent) => parent.operations)
+    .find((operation) => operation.retryOfOperationID === operationID)
+}
+
+function reconcileSelection(
+  input: PresentationState,
+  parents: ReadonlyArray<ParentSummary>,
+  explicit: { readonly parentID: string; readonly operationID?: string } | undefined,
+) {
   const restored = sanitizePresentationState(input)
-  const explicit = entrySessionID ? explicitSelection(parents, entrySessionID) : undefined
   const adjustedFilters: Array<keyof Filters> = []
   const searchExcludes =
     explicit &&

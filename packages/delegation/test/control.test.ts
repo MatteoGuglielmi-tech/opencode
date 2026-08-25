@@ -83,6 +83,82 @@ describe("delegation controls", () => {
     await store.close()
   })
 
+  test("retains interrupted history while separate retry and dismiss episodes consume eligibility", async () => {
+    await using tmp = await tempDirectory()
+    const options = decode({ profile: tmp.path, store: path.join(tmp.path, "coordinator.sqlite"), concurrency: 2 })
+    await initialize(options)
+    const store = await open(options)
+    const batch = await store.admit(request("parent-a", ["retry this", "dismiss this"], 1))
+    await store.acknowledgeReceipt(batch.batch.id)
+    await store.claimQueued(2, 2)
+    await Promise.all(
+      batch.batch.operations.map((operation, index) =>
+        store.transition(operation.id, ["starting"], "running", {
+          childID: `child-${index}`,
+          executionStartedAt: 3,
+        }),
+      ),
+    )
+    await store.reconcileStartup(4)
+    const interrupted = await Promise.all(batch.batch.operations.map((operation) => store.operation(operation.id)))
+    const retry = {
+      parentID: "parent-a",
+      invocationID: "retry-episode",
+      canonical: "retry",
+      action: { action: "retry" as const, operationID: batch.batch.operations[0].id },
+      committedAt: 5,
+    }
+    const dismiss = {
+      parentID: "parent-a",
+      invocationID: "dismiss-episode",
+      canonical: "dismiss",
+      action: { action: "dismiss" as const, operationID: batch.batch.operations[1].id },
+      committedAt: 6,
+    }
+
+    const retried = await store.commitControl(retry)
+    const dismissed = await store.commitControl(dismiss)
+
+    expect(await store.commitControl(retry)).toEqual({ ...retried, created: false })
+    expect(await store.commitControl(dismiss)).toEqual({ ...dismissed, created: false })
+    expect(await Promise.all(batch.batch.operations.map((operation) => store.operation(operation.id)))).toEqual(
+      interrupted.map((operation) => ({ ...operation!, recoveryEligible: false })),
+    )
+    expect((await store.snapshot({ parentID: "parent-a" })).operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: batch.batch.operations[0].id,
+          state: "interrupted",
+          childID: "child-0",
+          executionStartedAt: 3,
+          executionEndedAt: 4,
+          executionEndSource: "startup_reconciliation",
+          terminalAt: 4,
+          recoveryID: expect.stringMatching(/^rcv_/),
+          recoveryReconciledAt: 4,
+          recoveryPreviousState: "running",
+          recoveryDelivery: "pending",
+        }),
+        expect.objectContaining({
+          id: batch.batch.operations[1].id,
+          state: "interrupted",
+          childID: "child-1",
+          executionStartedAt: 3,
+          executionEndedAt: 4,
+          executionEndSource: "startup_reconciliation",
+          terminalAt: 4,
+          recoveryID: expect.stringMatching(/^rcv_/),
+          recoveryReconciledAt: 4,
+          recoveryPreviousState: "running",
+          recoveryDelivery: "pending",
+        }),
+        expect.objectContaining({ retryOfOperationID: batch.batch.operations[0].id, state: "queued" }),
+      ]),
+    )
+    expect(await store.pendingControls()).toHaveLength(2)
+    await store.close()
+  })
+
   test("commits only parent-owned cancellation, steering, and dismissal controls", async () => {
     await using tmp = await tempDirectory()
     const options = decode({ profile: tmp.path, store: path.join(tmp.path, "coordinator.sqlite"), concurrency: 1 })
@@ -120,7 +196,10 @@ describe("delegation controls", () => {
       action: { action: "cancel", batchID: batch.batch.id },
       committedAt: 6,
     })
-    expect(cancel.effect).toEqual({ kind: "cancel", operationIDs: batch.batch.operations.slice(0, 2).map((item) => item.id) })
+    expect(cancel.effect).toEqual({
+      kind: "cancel",
+      operationIDs: batch.batch.operations.slice(0, 2).map((item) => item.id),
+    })
     expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({ cancellationRequested: true })
     expect(await store.operation(batch.batch.operations[1].id)).toMatchObject({
       state: "interrupted",

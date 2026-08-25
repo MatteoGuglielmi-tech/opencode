@@ -3,6 +3,8 @@ import {
   emptyPresentationState,
   locationIdentity,
   reconcilePresentationState,
+  revealOperation,
+  retryForOperation,
   sanitizePresentationState,
   type PresentationState,
 } from "../src/presentation"
@@ -69,6 +71,30 @@ describe("Delegation supervision presentation state", () => {
     expect(result.adjustedFilters).toEqual([])
     expect(result.state.filters.search).toBe("queued")
     expect(result.state.selectedOperationID).toBe("dop_queued")
+  })
+
+  test("keeps the original selected after retry and explicitly reveals the linked operation", () => {
+    const state: PresentationState = {
+      ...emptyPresentationState(),
+      filters: { search: "original", actionableOnly: true },
+      selectedParentID: "ses_parent",
+      selectedOperationID: "dop_original",
+    }
+    const original = operation("dop_original", "original", "terminal")
+    const retry = { ...operation("dop_retry", "retried work", "queued"), retryOfOperationID: original.id }
+
+    const parents = [parent("ses_parent", [retry, original])]
+    const retained = revealOperation(state, parents, original.id)
+    const linked = retryForOperation(parents, original.id)
+    const result = revealOperation(retained.state, parents, linked!.id)
+
+    expect(retained.adjustedFilters).toEqual(["actionableOnly"])
+    expect(retained.state.selectedOperationID).toBe("dop_original")
+    expect(linked?.id).toBe("dop_retry")
+    expect(result.adjustedFilters).toEqual(["search"])
+    expect(result.state.filters).toEqual({ search: "", actionableOnly: false })
+    expect(result.state.selectedParentID).toBe("ses_parent")
+    expect(result.state.selectedOperationID).toBe("dop_retry")
   })
 
   test("removed selections and anchors use the nearest surviving identity", () => {
