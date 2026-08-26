@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
+import { TextareaRenderable, type Renderable } from "@opentui/core"
 import { Effect, FileSystem } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Global } from "@opencode-ai/util/global"
@@ -131,7 +132,11 @@ test("external Delegation command opens its query-backed page", async () => {
         maxPasses: 100,
       }),
     ).toContain("Delegate work")
-    await setup.mockInput.typeText("egations")
+    setup.mockInput.pressEnter()
+    await setup.renderOnce()
+    expect(findTextarea(setup.renderer.root)?.extmarks.getAtOffset(1)).not.toHaveLength(0)
+    setup.mockInput.pressKey("u", { ctrl: true })
+    await setup.mockInput.typeText("/delegations")
     setup.mockInput.pressEnter()
     await setup.waitForFrame((value) => value.includes("retained operation"), { maxPasses: 100 })
 
@@ -142,3 +147,8 @@ test("external Delegation command opens its query-backed page", async () => {
     await server.stop()
   }
 })
+
+function findTextarea(root: Renderable): TextareaRenderable | undefined {
+  if (root instanceof TextareaRenderable) return root
+  return root.getChildren().map(findTextarea).find(Boolean)
+}

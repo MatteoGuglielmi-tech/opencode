@@ -506,6 +506,13 @@ export function Autocomplete(props: {
     props.input().deleteRange(0, 0, cursor.row, cursor.col)
     props.input().insertText(newText)
     props.input().cursorOffset = stringWidth(newText)
+    props.input().extmarks.create({
+      start: 0,
+      end: stringWidth(`/${name}`),
+      virtual: true,
+      styleId: props.skillStyleId,
+      typeId: props.promptPartTypeId(),
+    })
   }
 
   const commands = createMemo((): AutocompleteOption[] => {
