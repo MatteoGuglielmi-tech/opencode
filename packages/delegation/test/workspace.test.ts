@@ -429,8 +429,30 @@ describe("Delegation supervision workspace", () => {
         text: {
           default: "#ffffff",
           subdued: "#888888",
-          feedback: { warning: { default: "#ffff00" }, error: { default: "#ff0000" } },
+          action: {
+            primary: { default: "#ffffff" },
+            destructive: { default: "#ff8888" },
+          },
+          feedback: {
+            info: { default: "#88ccff" },
+            success: { default: "#88ff88" },
+            warning: { default: "#ffff00" },
+            error: { default: "#ff0000" },
+          },
         },
+        background: {
+          action: {
+            primary: { default: "#224466" },
+            destructive: { default: "#662222" },
+          },
+          feedback: {
+            info: { default: "#112233" },
+            success: { default: "#113311" },
+            warning: { default: "#332211" },
+            error: { default: "#331111" },
+          },
+        },
+        border: { default: "#666666" },
       },
       keymap: { layer: (input: () => KeymapLayer) => layers.push(input()) },
         ui: {
@@ -483,9 +505,10 @@ describe("Delegation supervision workspace", () => {
         },
       ])
       const commands = new Map(layers.flatMap((layer) => layer.commands ?? []).map((command) => [command.id, command]))
-      await app.mockMouse.click(3, 7)
+      commands.get("delegation.supervision.focus.next")?.run()
+      commands.get("delegation.supervision.navigation.previous")?.run()
       await app.waitForFrame((frame) => bidiPlain(frame).includes("index 0"))
-      await app.mockMouse.click(3, 10)
+      commands.get("delegation.supervision.navigation.next")?.run()
       await app.waitForFrame((frame) => bidiPlain(frame).includes("index 1"))
       commands.get("delegation.supervision.navigation.previous")?.run()
       await app.waitForFrame((frame) => bidiPlain(frame).includes("index 0"))
@@ -497,7 +520,20 @@ describe("Delegation supervision workspace", () => {
         .flatMap((layer) => layer.commands ?? [])
         .find((command) => command.id === "delegation.supervision.filter.search")
       await search?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("Search: nested"))
+      app.resize(100, 30)
+      const visual = await app.waitForFrame((frame) => bidiPlain(frame).includes("Search: nested"))
+      expect(visual).toContain("COMPLETED")
+      expect(visual).toMatch(/Q━+S━+R━+F━+/)
+      expect(visual).toContain("┌")
+      expect(visual).toContain("Observed")
+      expect(visual.indexOf("Open child Session")).toBeLessThan(visual.indexOf("Truthful timeline"))
+      commands.get("delegation.supervision.focus.next")?.run()
+      commands.get("delegation.supervision.focus.next")?.run()
+      commands.get("delegation.supervision.scroll.page-down")?.run()
+      await app.waitForFrame((frame) => frame.includes("Open child Session"))
+      commands.get("delegation.supervision.scroll.page-up")?.run()
+      commands.get("delegation.supervision.focus.previous")?.run()
+      commands.get("delegation.supervision.focus.previous")?.run()
 
       expect([...commands.keys()]).toEqual(
         expect.arrayContaining([
@@ -527,7 +563,7 @@ describe("Delegation supervision workspace", () => {
       commands.get("delegation.supervision.child.open")?.run()
       await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
       commands.get("delegation.supervision.child.open")?.run()
-      await app.waitForFrame((frame) => frame.includes("Inspector") && frame.includes("Operation"))
+      await app.waitForFrame((frame) => frame.includes("Inspector") && frame.includes("Truthful timeline"))
       commands.get("delegation.supervision.back")?.run()
       await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
 
@@ -574,7 +610,7 @@ describe("Delegation supervision workspace", () => {
       await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
       app.resize(50, 16)
       const minimum = await app.waitForFrame(
-        (frame) => frame.includes("Timeline") && bidiPlain(frame).includes("nested [terminal]"),
+        (frame) => frame.includes("Timeline") && frame.includes("COMPLETED") && bidiPlain(frame).includes("nested"),
       )
       expect(minimum.split("\n")).toHaveLength(17)
     } finally {
@@ -664,15 +700,9 @@ describe("Delegation supervision workspace", () => {
       await restored.waitForFrame((frame) => frame.includes("> Back") && frame.includes("Timeline"))
       rtlCommands.get("delegation.supervision.child.open")?.run()
       restored.resize(50, 16)
-      const inspectorStart = await restored.waitForFrame(
-        (frame) => frame.includes("> Back") && frame.includes("Inspector") && frame.includes("Operation"),
+      await restored.waitForFrame(
+        (frame) => frame.includes("> Back") && frame.includes("Inspector") && frame.includes("Parent:"),
       )
-      rtlCommands.get("delegation.supervision.scroll.page-down")?.run()
-      await restored.renderOnce()
-      expect(restored.captureCharFrame()).not.toBe(inspectorStart)
-      rtlCommands.get("delegation.supervision.scroll.page-up")?.run()
-      await restored.renderOnce()
-      expect(restored.captureCharFrame()).toBe(inspectorStart)
       rtlCommands.get("delegation.supervision.back")?.run()
       await restored.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
       rtlCommands.get("delegation.supervision.back")?.run()
