@@ -141,7 +141,7 @@ function SupervisionPage(props: {
   let dragX: number | undefined
   let dragging: Separator | undefined
   const synchronization = createSupervisionSynchronization<PermissionRequest>({
-    load: (request) => loadSupervision(props.context.client, entry(), request),
+    load: (request) => loadSupervision(props.context.client, location, entry(), request),
     permissions: async (childIDs) => {
       await Promise.all(childIDs.map((sessionID) => props.context.data.session.permission.sync(sessionID)))
       return new Map(
@@ -315,6 +315,7 @@ function SupervisionPage(props: {
         const latestParent = latest.parents.find((candidate) => candidate.session.id === parent.session.id)
         if (!latestParent?.nextCursor) return
         const page = await loadSupervisionPage(props.context.client, {
+          location,
           generation: latest.generation,
           parentID: latestParent.session.id,
           cursor: latestParent.nextCursor,

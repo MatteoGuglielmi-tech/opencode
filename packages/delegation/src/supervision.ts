@@ -1,6 +1,6 @@
 export * as DelegationSupervision from "./supervision.js"
 
-import type { OpenCodeClient } from "@opencode-ai/client"
+import type { LocationRef, OpenCodeClient } from "@opencode-ai/client"
 import { Effect, Schema } from "effect"
 import type { Health } from "./runtime.js"
 import type { DelegationSnapshot, OperationRecord, PermissionWait, Store } from "./storage.js"
@@ -346,6 +346,7 @@ export async function loadSupervision(
       }
     }
   },
+  location: LocationRef,
   entrySessionID: string | undefined,
   options?: {
     readonly generation: number
@@ -359,6 +360,7 @@ export async function loadSupervision(
   const response = await client.plugin.query.invoke({
     pluginID: "opencode.delegation",
     query: QUERY,
+    location: { directory: location.directory, ...(location.workspaceID ? { workspace: location.workspaceID } : {}) },
     version: VERSION,
     input: {
       ...(entrySessionID ? { entrySessionID } : {}),
@@ -380,11 +382,21 @@ export async function loadSupervision(
 
 export async function loadSupervisionPage(
   client: Parameters<typeof loadSupervision>[0],
-  input: { readonly generation: number; readonly parentID: string; readonly cursor: string; readonly limit: number },
+  input: {
+    readonly location: LocationRef
+    readonly generation: number
+    readonly parentID: string
+    readonly cursor: string
+    readonly limit: number
+  },
 ) {
   const response = await client.plugin.query.invoke({
     pluginID: "opencode.delegation",
     query: QUERY,
+    location: {
+      directory: input.location.directory,
+      ...(input.location.workspaceID ? { workspace: input.location.workspaceID } : {}),
+    },
     version: VERSION,
     input: {
       generation: input.generation,

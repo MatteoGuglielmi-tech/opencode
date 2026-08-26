@@ -18,6 +18,16 @@ test("external Delegation command opens its query-backed page", async () => {
       return json({ location, data: [{ name: "delegate", template: "", description: "Delegate work" }] })
     }
     if (url.pathname === "/api/plugin/opencode.delegation/query/supervision") {
+      if (url.searchParams.get("location[directory]") !== directory) {
+        return json(
+          {
+            kind: "plugin_unavailable",
+            pluginID: "opencode.delegation",
+            message: "Plugin is unavailable: opencode.delegation",
+          },
+          { status: 404 },
+        )
+      }
       return json({
         location,
         data: {

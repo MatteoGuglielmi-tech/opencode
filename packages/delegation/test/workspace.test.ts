@@ -13,6 +13,7 @@ import {
   mergeHistoryPage,
   reconcileHistoryRefresh,
   loadSupervision,
+  loadSupervisionPage,
   projectWorkspace,
   supervisionView,
   WorkspaceInput,
@@ -137,15 +138,38 @@ describe("Delegation supervision workspace", () => {
     })
     const output = await Effect.runPromise(definition.execute({}))
     const query = client(output)
-    expect(await loadSupervision(query.client, undefined)).toEqual(output)
-    await expect(loadSupervision(client(output, "1").client, undefined)).rejects.toThrow(
+    expect(await loadSupervision(query.client, { directory: "/repo", workspaceID: "workspace" }, undefined)).toEqual(
+      output,
+    )
+    await expect(loadSupervision(client(output, "1").client, { directory: "/repo" }, undefined)).rejects.toThrow(
       "Unsupported Delegation supervision version: 1",
     )
     expect(query.input).toEqual({
       pluginID: "opencode.delegation",
       query: "supervision",
+      location: { directory: "/repo", workspace: "workspace" },
       version: "2",
       input: {},
+    })
+    const page = client({
+      type: "history-page",
+      generation: 1,
+      observedAt: 1,
+      parentID: "ses_parent",
+      cursor: "cursor",
+      operations: [],
+      batches: [],
+    })
+    await loadSupervisionPage(page.client, {
+      location: { directory: "/repo", workspaceID: "workspace" },
+      generation: 1,
+      parentID: "ses_parent",
+      cursor: "cursor",
+      limit: 10,
+    })
+    expect(page.input).toMatchObject({
+      location: { directory: "/repo", workspace: "workspace" },
+      input: { page: { parentID: "ses_parent", cursor: "cursor", limit: 10 } },
     })
     expect(supervisionView(undefined, undefined, { search: "", actionableOnly: false })).toEqual({ type: "loading" })
     const empty: WorkspaceResult = {
@@ -453,6 +477,7 @@ describe("Delegation supervision workspace", () => {
         {
           pluginID: "opencode.delegation",
           query: "supervision",
+          location: { directory: "/repo" },
           version: "2",
           input: {},
         },
