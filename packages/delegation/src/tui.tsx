@@ -50,7 +50,7 @@ const ID = "opencode.delegation"
 
 export function openSupervision(route: Route): Destination | undefined {
   if (route.type === "plugin" && route.id === ID && route.name === PAGE) return
-  const returnRoute = structuredClone(route)
+  const returnRoute: Route = { ...route, ...(route.type === "plugin" && route.data ? { data: { ...route.data } } : {}) }
   return {
     type: "plugin",
     name: PAGE,
@@ -1406,7 +1406,7 @@ function routeValue(value: unknown): Route | undefined {
   ) {
     const data =
       "data" in value && typeof value.data === "object" && value.data !== null && !Array.isArray(value.data)
-        ? structuredClone(value.data)
+        ? { ...value.data }
         : undefined
     return { type: "plugin", id: value.id, name: value.name, ...(data ? { data } : {}) }
   }
