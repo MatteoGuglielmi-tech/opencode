@@ -441,6 +441,7 @@ describe("Delegation supervision workspace", () => {
           },
         },
         background: {
+          default: "#000000",
           surface: { offset: "#111111" },
           action: {
             primary: { default: "#224466" },
@@ -508,13 +509,14 @@ describe("Delegation supervision workspace", () => {
       const commands = new Map(layers.flatMap((layer) => layer.commands ?? []).map((command) => [command.id, command]))
       commands.get("delegation.supervision.focus.next")?.run()
       commands.get("delegation.supervision.navigation.previous")?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("> first"))
+      if (bidiPlain(app.captureCharFrame()).split("first").length !== 4)
+        await app.waitForFrame((frame) => bidiPlain(frame).split("first").length === 4)
       commands.get("delegation.supervision.navigation.next")?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("> second"))
+      await app.waitForFrame((frame) => bidiPlain(frame).split("second").length === 3)
       commands.get("delegation.supervision.navigation.previous")?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("> first"))
+      await app.waitForFrame((frame) => bidiPlain(frame).split("first").length === 4)
       commands.get("delegation.supervision.navigation.next")?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("> second"))
+      await app.waitForFrame((frame) => bidiPlain(frame).split("second").length === 3)
       commands.get("delegation.supervision.scroll.page-down")?.run()
       commands.get("delegation.supervision.scroll.page-up")?.run()
       const search = layers

@@ -785,6 +785,13 @@ function SupervisionPage(props: {
     })
     if (value !== undefined) setSearch(value)
   }
+  const showIdentifiers = (operation = selectedOperation()) => {
+    if (!operation) return
+    return configureDialog().alert({
+      title: "Delegation identifiers",
+      message: `Operation ${ltrDirection(operation.id)}\nBatch ${ltrDirection(operation.batchID)}\nParent ${ltrDirection(operation.parentID)}\nAgent ${ltrDirection(operation.agent)}`,
+    })
+  }
   const theme = props.context.theme
 
   function StatusBadge(badgeProps: { readonly operation: ProjectedOperation }) {
@@ -809,22 +816,37 @@ function SupervisionPage(props: {
     )
   }
 
-  function TimelineVisual(visualProps: { readonly operation: ProjectedOperation; readonly onSelect?: () => void }) {
-    const width = () => Math.max(12, Math.min(28, (layout().timeline ?? 32) - 4))
+  function TimelineVisual(visualProps: {
+    readonly operation: ProjectedOperation
+    readonly onSelect?: () => void
+    readonly width?: number
+  }) {
+    const width = () => visualProps.width ?? Math.max(12, Math.min(48, (layout().timeline ?? 32) - 4))
     const geometry = createMemo(() => timelineGeometry(visualProps.operation, observedAt(), width()))
     return (
       <box height={1} minWidth={0} flexDirection="row" position="relative" onMouseUp={visualProps.onSelect}>
         <For each={geometry().segments}>
           {(segment) => (
-            <text fg={timelineColor(segment.label, theme)} wrapMode="none" onMouseUp={visualProps.onSelect}>
+            <text
+              fg={theme.background.default}
+              bg={timelineColor(segment.label, theme)}
+              wrapMode="none"
+              onMouseUp={visualProps.onSelect}
+            >
               {timelineSegment(segment.label, segment.width)}
             </text>
           )}
         </For>
         <For each={geometry().waits}>
           {(wait) => (
-            <text position="absolute" left={wait.start} fg={theme.text.feedback.warning.default} wrapMode="none">
-              {"◆".repeat(wait.width)}
+            <text
+              position="absolute"
+              left={wait.start}
+              fg={theme.background.default}
+              bg={theme.text.feedback.warning.default}
+              wrapMode="none"
+            >
+              {" ".repeat(wait.width)}
             </text>
           )}
         </For>
@@ -936,6 +958,13 @@ function SupervisionPage(props: {
         title: "Inspect or open child Session",
         bind: "enter",
         run: forward,
+      },
+      {
+        id: "delegation.supervision.identifiers",
+        title: "Show Delegation identifiers",
+        bind: "ctrl+i",
+        enabled: () => Boolean(selectedOperation()),
+        run: () => showIdentifiers(),
       },
       {
         id: "delegation.supervision.refresh",
@@ -1161,19 +1190,22 @@ function SupervisionPage(props: {
   }
 
   function TimelinePane() {
+    const labelWidth = () => Math.max(22, Math.floor(layout().timeline * 0.36))
+    const trackWidth = () => Math.max(12, layout().timeline - labelWidth() - 3)
     return (
       <box width={layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
         <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
-          <text fg={focus() === "timeline" ? theme.text.default : theme.text.subdued}>Timeline</text>
+          <text fg={theme.text.subdued}>Timeline</text>
           <Show when={selectedParentRecord()}>
             {(parent: () => NonNullable<ReturnType<typeof selectedParentRecord>>) => (
-              <text fg={theme.text.subdued} truncate>
+              <text fg={focus() === "timeline" ? theme.text.default : theme.text.subdued} truncate>
                 {parent().session.title
                   ? autoDirection(parent().session.title!)
                   : ltrDirection(compactID(parent().session.id))}
               </text>
             )}
           </Show>
+          <box flexGrow={1} />
           <Show
             when={
               synchronization.mutationsEnabled() &&
@@ -1188,6 +1220,7 @@ function SupervisionPage(props: {
             />
           </Show>
         </box>
+        <text fg={theme.text.subdued}>Newest batches first; operations retain server order</text>
         <scrollbox
           ref={(element) => (timelineScroll = element)}
           flexGrow={1}
@@ -1196,20 +1229,41 @@ function SupervisionPage(props: {
         >
           <For each={selectedParentRecord()?.batches ?? []}>
             {(item) => (
-              <box flexDirection="column">
-                <text fg={theme.text.subdued}>Batch {ltrDirection(compactID(item.id))}</text>
+              <box flexDirection="column" marginTop={1}>
+                <box
+                  flexDirection={rowDirection(direction())}
+                  backgroundColor={theme.background.surface.offset}
+                  paddingLeft={1}
+                  paddingRight={1}
+                >
+                  <text fg={theme.text.subdued}>Batch {ltrDirection(compactID(item.id))}</text>
+                  <box flexGrow={1} />
+                  <text fg={theme.text.subdued}>
+                    {selectedParentRecord()?.operations.filter((operation) => operation.batchID === item.id).length ?? 0}{" "}
+                    operations
+                  </text>
+                </box>
                 <For each={selectedParentRecord()?.operations.filter((operation) => operation.batchID === item.id) ?? []}>
                   {(operation) => (
                     <box
-                      flexDirection="column"
+                      flexDirection={rowDirection(direction())}
+                      minHeight={4}
+                      minWidth={0}
+                      border={["top"]}
+                      borderColor={theme.border.default}
+                      backgroundColor={selectedOperationKey() === operation.id ? theme.background.surface.offset : undefined}
                       onMouseUp={() => {
                         setFocus("timeline")
                         selectOperation(operation.id, true)
                       }}
                     >
                       <box
-                        flexDirection={rowDirection(direction())}
-                        gap={1}
+                        width={labelWidth()}
+                        paddingLeft={direction() === "rtl" ? 0 : 1}
+                        paddingRight={direction() === "rtl" ? 1 : 0}
+                        border={selectedOperationKey() === operation.id ? [direction() === "rtl" ? "right" : "left"] : []}
+                        borderColor={theme.text.feedback.info.default}
+                        flexDirection="column"
                         minWidth={0}
                         onMouseUp={() => {
                           setFocus("timeline")
@@ -1225,18 +1279,30 @@ function SupervisionPage(props: {
                             selectOperation(operation.id, true)
                           }}
                         >
-                          {selectedOperationKey() === operation.id ? (direction() === "rtl" ? " <" : "> ") : "  "}
                           {autoDirection(operation.text)}
                           {pendingFor(operation.id) ? " [Control confirming]" : ""}
                         </text>
+                        <text fg={theme.text.subdued}>{elapsed(operation, observedAt())}</text>
                       </box>
-                      <TimelineVisual
-                        operation={operation}
-                        onSelect={() => {
-                          setFocus("timeline")
-                          selectOperation(operation.id, true)
-                        }}
-                      />
+                      <box
+                        flexGrow={1}
+                        minWidth={0}
+                        paddingLeft={1}
+                        paddingRight={1}
+                        border={[direction() === "rtl" ? "right" : "left"]}
+                        borderColor={theme.border.default}
+                        justifyContent="center"
+                        flexDirection="column"
+                      >
+                        <TimelineVisual
+                          operation={operation}
+                          width={trackWidth()}
+                          onSelect={() => {
+                            setFocus("timeline")
+                            selectOperation(operation.id, true)
+                          }}
+                        />
+                      </box>
                     </box>
                   )}
                 </For>
@@ -1265,7 +1331,7 @@ function SupervisionPage(props: {
       <box width={layout().inspector ?? layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
         <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
           <text fg={focus() === "inspector" ? theme.text.default : theme.text.subdued}>Inspector</text>
-          <text fg={theme.text.subdued}>PgUp/PgDn</text>
+          <text fg={theme.text.subdued}>PgUp/PgDn · ^I IDs</text>
         </box>
         <scrollbox
           ref={(element) => (inspectorScroll = element)}
@@ -1278,7 +1344,12 @@ function SupervisionPage(props: {
               <box flexDirection="column" flexShrink={0}>
                 <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
                   <StatusBadge operation={operation()} />
-                  <text fg={theme.text.default} wrapMode="none" truncate>
+                  <text
+                    fg={theme.text.default}
+                    wrapMode="none"
+                    truncate
+                    onMouseUp={() => showIdentifiers(operation())}
+                  >
                     {ltrDirection(compactID(operation().id))}
                   </text>
                 </box>
@@ -1306,16 +1377,17 @@ function SupervisionPage(props: {
                   <FactCard label="Observed" value={ltrDirection(observedAt())} />
                 </box>
                 <text fg={theme.text.default}>Truthful timeline</text>
-                <TimelineVisual operation={operation()} />
+                <text fg={theme.text.subdued}>
+                  Committed milestones; open intervals stop at the server observation time.
+                </text>
+                <TimelineVisual
+                  operation={operation()}
+                  width={Math.max(12, (layout().inspector ?? layout().timeline) - 2)}
+                />
                 <text fg={theme.text.subdued}>{ltrDirection(timelineTrack(operation(), observedAt()))}</text>
                 <For each={operationInspector(operation(), observedAt()).slice(5)}>
                   {(line) => <text fg={theme.text.subdued}>{line}</text>}
                 </For>
-                <text fg={theme.text.default}>Identifiers</text>
-                <text fg={theme.text.subdued}>Operation {ltrDirection(operation().id)}</text>
-                <text fg={theme.text.subdued}>Batch {ltrDirection(operation().batchID)}</text>
-                <text fg={theme.text.subdued}>Parent {ltrDirection(operation().parentID)}</text>
-                <text fg={theme.text.subdued}>Agent {ltrDirection(operation().agent)}</text>
                 <Show when={operation().childID}>
                   <Show when={selectedPermissions().length > 0}>
                     <text fg={theme.text.feedback.warning.default}>
@@ -1662,6 +1734,15 @@ function duration(label: string, start: number, end: number) {
 function compactID(value: string) {
   if (value.length <= 20) return value
   return `${value.slice(0, 10)}...${value.slice(-6)}`
+}
+
+function elapsed(operation: ProjectedOperation, observedAt: number) {
+  const milliseconds = Math.max(0, (operation.timeline.concludedAt ?? observedAt) - operation.timeline.admittedAt)
+  const seconds = Math.floor(milliseconds / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
 function failureGuidance(code: SynchronizationFailure["code"] | undefined) {
