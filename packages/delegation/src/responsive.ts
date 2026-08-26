@@ -12,14 +12,14 @@ export type ResponsiveLayout = {
 
 const PAGE_PADDING = 2
 const MIN_PARENTS = 18
-const MIN_TIMELINE = 28
+const MIN_TIMELINE = 36
 const MIN_INSPECTOR = 28
-const DEFAULT_PARENTS = 24
-const DEFAULT_INSPECTOR = 36
+const DEFAULT_PARENTS = 18
+const DEFAULT_INSPECTOR = 30
 
 export function layoutFor(width: number, remembered: { readonly parents?: number; readonly inspector?: number }) {
   const content = Math.max(1, width - PAGE_PADDING)
-  if (width < 80)
+  if (width < 72)
     return {
       composition: "narrow",
       width,
@@ -27,7 +27,7 @@ export function layoutFor(width: number, remembered: { readonly parents?: number
       separators: [],
     } satisfies ResponsiveLayout
 
-  if (width < 120) {
+  if (width < 96) {
     const available = Math.max(1, content - 1)
     const inspector = clamp(remembered.inspector ?? DEFAULT_INSPECTOR, MIN_INSPECTOR, available - MIN_TIMELINE)
     return {

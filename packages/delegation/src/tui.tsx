@@ -9,6 +9,7 @@ import {
   loadSupervision,
   loadSupervisionPage,
   mergeHistoryPage,
+  type ParentSummary,
   type ProjectedOperation,
   supervisionView,
   type WorkspaceResult,
@@ -131,7 +132,7 @@ function SupervisionPage(props: {
   const layout = createMemo(() =>
     layoutFor(
       dimensions().width,
-      dimensions().width >= 120
+      dimensions().width >= 96
         ? { parents: wideParents(), inspector: wideInspector() }
         : { inspector: mediumInspector() },
     ),
@@ -294,7 +295,7 @@ function SupervisionPage(props: {
             title: "Load older Delegation history",
             current: selectedParent(),
             options: available.map((parent) => ({
-              title: parent.session.title ? autoDirection(parent.session.title) : ltrDirection(parent.session.id),
+              title: parentDisplay(parent),
               value: parent.session.id,
               description: `${ltrDirection(parent.operations.length)} loaded / ${ltrDirection(parent.counts.total)} retained`,
             })),
@@ -654,6 +655,10 @@ function SupervisionPage(props: {
   const selectedParentRecord = createMemo(() =>
     ready()?.parents.find((candidate) => candidate.session.id === selectedParent()),
   )
+  const selectedParentLabel = createMemo(() => {
+    const parent = selectedParentRecord()
+    return parent ? parentDisplay(parent) : "none"
+  })
   const focusOrder = () => {
     if (layout().composition === "wide")
       return ["parents", "parentSeparator", "timeline", "timelineSeparator", "inspector"] as const
@@ -770,7 +775,7 @@ function SupervisionPage(props: {
       title: "Select parent Session",
       current: selectedParent(),
       options: (ready()?.parents ?? []).map((parent) => ({
-        title: parent.session.title ? autoDirection(parent.session.title) : ltrDirection(parent.session.id),
+        title: parentDisplay(parent),
         value: parent.session.id,
         description: `${ltrDirection(parent.counts.actionable)} actionable / ${ltrDirection(parent.counts.total)} retained`,
       })),
@@ -789,7 +794,7 @@ function SupervisionPage(props: {
     if (!operation) return
     return configureDialog().alert({
       title: "Delegation identifiers",
-      message: `Operation ${ltrDirection(operation.id)}\nBatch ${ltrDirection(operation.batchID)}\nParent ${ltrDirection(operation.parentID)}\nAgent ${ltrDirection(operation.agent)}`,
+      message: `Operation ${ltrDirection(operation.id)}\nBatch ${ltrDirection(operation.batchID)}\nParent ${ltrDirection(operation.parentID)}\nChild ${ltrDirection(operation.childID ?? "not started")}\nAgent ${ltrDirection(operation.agent)}`,
     })
   }
   const theme = props.context.theme
@@ -801,16 +806,18 @@ function SupervisionPage(props: {
         : badgeProps.operation.presentationState === "terminal"
           ? badgeProps.operation.outcome?.state.toUpperCase() ?? "TERMINAL"
           : badgeProps.operation.presentationState.toUpperCase()
-    const kind = () =>
-      badgeProps.operation.presentationState === "waiting"
-        ? "warning"
-        : badgeProps.operation.presentationState === "terminal" && badgeProps.operation.outcome?.state === "completed"
-          ? "success"
-          : badgeProps.operation.presentationState === "terminal"
-            ? "error"
-            : "info"
+    const color = () => {
+      if (badgeProps.operation.presentationState === "queued") return theme.text.subdued
+      if (badgeProps.operation.presentationState === "starting")
+        return theme.categorical[1]?.[200] ?? theme.text.feedback.info.default
+      if (badgeProps.operation.presentationState === "running")
+        return theme.categorical[0]?.[200] ?? theme.text.feedback.info.default
+      if (badgeProps.operation.presentationState === "waiting") return theme.text.feedback.warning.default
+      if (badgeProps.operation.outcome?.state === "completed") return theme.text.feedback.success.default
+      return theme.text.feedback.error.default
+    }
     return (
-      <text fg={theme.text.feedback[kind()].default} wrapMode="none" marginRight={1}>
+      <text fg={color()} wrapMode="none" marginRight={1}>
         {`● ${label()}`}
       </text>
     )
@@ -822,9 +829,19 @@ function SupervisionPage(props: {
     readonly width?: number
   }) {
     const width = () => visualProps.width ?? Math.max(12, Math.min(48, (layout().timeline ?? 32) - 4))
-    const geometry = createMemo(() => timelineGeometry(visualProps.operation, observedAt(), width()))
+    const contentWidth = () => Math.max(8, width() - 2)
+    const geometry = createMemo(() => timelineGeometry(visualProps.operation, observedAt(), contentWidth()))
     return (
-      <box height={1} minWidth={0} flexDirection="row" position="relative" onMouseUp={visualProps.onSelect}>
+      <box
+        width={width()}
+        height={3}
+        minWidth={0}
+        flexDirection="row"
+        position="relative"
+        border={["top", "right", "bottom", "left"]}
+        borderColor={theme.border.default}
+        onMouseUp={visualProps.onSelect}
+      >
         <For each={geometry().segments}>
           {(segment) => (
             <text
@@ -857,7 +874,7 @@ function SupervisionPage(props: {
   function FactCard(cardProps: { readonly label: string; readonly value: string }) {
     return (
       <box
-        width={Math.max(12, Math.floor(((layout().inspector ?? layout().timeline) - 2) / 2))}
+        width={Math.max(12, Math.floor(((layout().inspector ?? layout().timeline) - 4) / 2))}
         height={2}
         minWidth={0}
         paddingLeft={direction() === "rtl" ? 0 : 1}
@@ -865,7 +882,6 @@ function SupervisionPage(props: {
         border={[direction() === "rtl" ? "right" : "left"]}
         borderColor={theme.border.default}
         flexDirection="column"
-        backgroundColor={theme.background.surface.offset}
       >
         <text fg={theme.text.subdued} wrapMode="none" truncate>
           {cardProps.label}
@@ -1161,21 +1177,36 @@ function SupervisionPage(props: {
 
   function ParentPane() {
     return (
-      <box width={layout().parents ?? layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
-        <text fg={focus() === "parents" ? theme.text.default : theme.text.subdued}>Parents</text>
+      <box
+        width={layout().parents ?? layout().timeline}
+        minWidth={0}
+        minHeight={0}
+        backgroundColor={theme.background.surface.offset}
+        flexDirection="column"
+      >
+        <text fg={focus() === "parents" ? theme.text.default : theme.text.subdued}>PARENTS</text>
         <scrollbox flexGrow={1} minHeight={0} scrollbarOptions={{ visible: false }}>
           <For each={ready()?.parents ?? []}>
             {(parent) => (
               <box
                 flexDirection="column"
+                minHeight={4}
+                paddingLeft={direction() === "rtl" ? 0 : 1}
+                paddingRight={direction() === "rtl" ? 1 : 0}
+                border={selectedParent() === parent.session.id ? [direction() === "rtl" ? "right" : "left"] : ["top"]}
+                borderColor={
+                  selectedParent() === parent.session.id ? theme.text.feedback.info.default : theme.border.default
+                }
+                backgroundColor={
+                  selectedParent() === parent.session.id ? theme.increase(theme.background.surface.offset) : undefined
+                }
                 onMouseUp={() => {
                   setFocus("parents")
                   selectParent(parent.session.id, true)
                 }}
               >
                 <text fg={selectedParent() === parent.session.id ? theme.text.default : theme.text.subdued} truncate>
-                  {selectedParent() === parent.session.id ? (direction() === "rtl" ? " <" : "> ") : "  "}
-                  {parent.session.title ? autoDirection(parent.session.title) : ltrDirection(compactID(parent.session.id))}
+                  {parentDisplay(parent)}
                 </text>
                 <text fg={theme.text.subdued} truncate>
                   {ltrDirection(parent.counts.actionable)} actionable / {ltrDirection(parent.counts.total)} retained
@@ -1199,9 +1230,7 @@ function SupervisionPage(props: {
           <Show when={selectedParentRecord()}>
             {(parent: () => NonNullable<ReturnType<typeof selectedParentRecord>>) => (
               <text fg={focus() === "timeline" ? theme.text.default : theme.text.subdued} truncate>
-                {parent().session.title
-                  ? autoDirection(parent().session.title!)
-                  : ltrDirection(compactID(parent().session.id))}
+                {parentDisplay(parent())}
               </text>
             )}
           </Show>
@@ -1328,11 +1357,18 @@ function SupervisionPage(props: {
 
   function InspectorPane() {
     return (
-      <box width={layout().inspector ?? layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
-        <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
-          <text fg={focus() === "inspector" ? theme.text.default : theme.text.subdued}>Inspector</text>
-          <text fg={theme.text.subdued}>PgUp/PgDn · ^I IDs</text>
-        </box>
+      <box
+        width={layout().inspector ?? layout().timeline}
+        minWidth={0}
+        minHeight={0}
+        paddingLeft={1}
+        paddingRight={1}
+        backgroundColor={theme.background.surface.offset}
+        flexDirection="column"
+      >
+        <text fg={focus() === "inspector" ? theme.text.default : theme.text.subdued}>
+          Inspector · PgUp/PgDn · ^I IDs
+        </text>
         <scrollbox
           ref={(element) => (inspectorScroll = element)}
           flexGrow={1}
@@ -1358,14 +1394,16 @@ function SupervisionPage(props: {
                 </text>
                 <text fg={theme.text.default}>{autoDirection(operation().text)}</text>
                 <InspectorActions operation={operation()} />
-                <box flexDirection={rowDirection(direction())} flexWrap="wrap" flexShrink={0}>
+                <box
+                  flexDirection={rowDirection(direction())}
+                  flexWrap="wrap"
+                  flexShrink={0}
+                  border={["top", "right", "bottom", "left"]}
+                  borderColor={theme.border.default}
+                >
                   <FactCard
                     label="Parent"
-                    value={
-                      selectedParentRecord()?.session.title
-                        ? autoDirection(selectedParentRecord()?.session.title ?? "")
-                        : ltrDirection(compactID(operation().parentID))
-                    }
+                    value={selectedParentLabel()}
                   />
                   <FactCard label="Child Session" value={ltrDirection(operation().childID ?? "not started")} />
                   <FactCard
@@ -1382,7 +1420,7 @@ function SupervisionPage(props: {
                 </text>
                 <TimelineVisual
                   operation={operation()}
-                  width={Math.max(12, (layout().inspector ?? layout().timeline) - 2)}
+                  width={Math.max(12, (layout().inspector ?? layout().timeline) - 4)}
                 />
                 <text fg={theme.text.subdued}>{ltrDirection(timelineTrack(operation(), observedAt()))}</text>
                 <For each={operationInspector(operation(), observedAt()).slice(5)}>
@@ -1507,13 +1545,31 @@ function SupervisionPage(props: {
         dragging = undefined
       }}
     >
-      <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
+      <box
+        flexDirection={rowDirection(direction())}
+        gap={1}
+        flexShrink={0}
+        paddingLeft={1}
+        paddingRight={1}
+        border={["top", "bottom"]}
+        borderColor={theme.border.default}
+        backgroundColor={theme.background.surface.offset}
+      >
         <text fg={theme.text.default}>Delegation supervision</text>
         <text fg={freshness() === "live" ? theme.text.subdued : theme.text.feedback.warning.default}>
           {freshness() === "loading" ? "LOADING" : freshness() === "live" ? "LIVE" : freshness() === "stale" ? "STALE" : "DEGRADED"}
         </text>
       </box>
-      <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
+      <box
+        flexDirection={rowDirection(direction())}
+        gap={1}
+        flexShrink={0}
+        paddingLeft={1}
+        paddingRight={1}
+        border={["bottom"]}
+        borderColor={theme.border.default}
+        backgroundColor={theme.background.surface.offset}
+      >
         <text fg={theme.text.action.primary.default} onMouseUp={searchHistory}>
           [ Search: {search() ? autoDirection(search()) : "all"} ^F ]
         </text>
@@ -1528,11 +1584,7 @@ function SupervisionPage(props: {
         <Show when={layout().composition === "medium"}>
           <text fg={theme.text.subdued} onMouseUp={selectParentDialog} truncate>
             Parent:{" "}
-            {selectedParentRecord()?.session.title
-              ? autoDirection(selectedParentRecord()!.session.title!)
-              : selectedParentRecord()?.session.id
-                ? ltrDirection(compactID(selectedParentRecord()!.session.id))
-                : "none"}{" "}
+            {selectedParentLabel()} {" "}
             | {ltrDirection(selectedParentRecord()?.counts.actionable ?? 0)} actionable /{" "}
             {ltrDirection(selectedParentRecord()?.counts.total ?? 0)} retained (select)
           </text>
@@ -1690,9 +1742,9 @@ function timelineGeometry(operation: ProjectedOperation, observedAt: number, wid
 
 function timelineColor(label: "Q" | "S" | "R" | "F", theme: Context["theme"]) {
   if (label === "Q") return theme.text.subdued
-  if (label === "S") return theme.text.feedback.info.default
-  if (label === "R") return theme.text.feedback.success.default
-  return theme.text.feedback.warning.default
+  if (label === "S") return theme.categorical[1]?.[200] ?? theme.text.feedback.warning.default
+  if (label === "R") return theme.categorical[0]?.[200] ?? theme.text.feedback.info.default
+  return theme.text.feedback.success.default
 }
 
 function timelineSegment(label: "Q" | "S" | "R" | "F", width: number) {
@@ -1734,6 +1786,12 @@ function duration(label: string, start: number, end: number) {
 function compactID(value: string) {
   if (value.length <= 20) return value
   return `${value.slice(0, 10)}...${value.slice(-6)}`
+}
+
+function parentDisplay(parent: ParentSummary) {
+  if (parent.session.title?.trim()) return autoDirection(parent.session.title)
+  if (parent.operations[0]) return autoDirection(parent.operations[0].text)
+  return ltrDirection(compactID(parent.session.id))
 }
 
 function elapsed(operation: ProjectedOperation, observedAt: number) {

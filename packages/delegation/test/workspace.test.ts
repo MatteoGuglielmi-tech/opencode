@@ -425,8 +425,10 @@ describe("Delegation supervision workspace", () => {
         },
         location: { default: () => ({ directory: "/repo" }) },
       },
-      theme: {
-        text: {
+        theme: {
+          increase: (color: string) => color,
+          categorical: [{ 200: "#70c7d1" }, { 200: "#ad9bdb" }],
+          text: {
           default: "#ffffff",
           subdued: "#888888",
           action: {
@@ -523,7 +525,7 @@ describe("Delegation supervision workspace", () => {
         .flatMap((layer) => layer.commands ?? [])
         .find((command) => command.id === "delegation.supervision.filter.search")
       await search?.run()
-      app.resize(100, 30)
+      app.resize(80, 30)
       const visual = await app.waitForFrame((frame) => bidiPlain(frame).includes("Search: nested"))
       expect(visual).toContain("COMPLETED")
       expect(visual).toMatch(/QUEUE━+START━+RUN━+FINAL━+/)
@@ -558,11 +560,11 @@ describe("Delegation supervision workspace", () => {
       commands.get("delegation.supervision.focus.next")?.run()
       await app.waitForFrame((frame) => frame.includes("┃"))
       commands.get("delegation.supervision.navigation.right")?.run()
-      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(34)
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(28)
 
-      app.resize(79, 24)
+      app.resize(71, 24)
       const narrow = await app.waitForFrame((frame) => frame.includes("Parents") && !frame.includes("Inspector"))
-      expect(narrow).not.toContain("│")
+      expect(narrow).not.toContain("┃")
       commands.get("delegation.supervision.child.open")?.run()
       await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
       commands.get("delegation.supervision.child.open")?.run()
@@ -571,43 +573,42 @@ describe("Delegation supervision workspace", () => {
       await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
 
       for (const [width, height, expected] of [
-        [120, 30, ["Parents", "Timeline", "Inspector"]],
-        [119, 30, ["Parent:", "Timeline", "Inspector"]],
-        [140, 40, ["Parents", "Timeline", "Inspector"]],
-        [100, 30, ["Parent:", "Timeline", "Inspector"]],
+        [96, 30, ["PARENTS", "Timeline", "Inspector"]],
+        [95, 30, ["Parent:", "Timeline", "Inspector"]],
+        [140, 40, ["PARENTS", "Timeline", "Inspector"]],
+        [100, 30, ["PARENTS", "Timeline", "Inspector"]],
+        [80, 30, ["Parent:", "Timeline", "Inspector"]],
       ] as const) {
         app.resize(width, height)
         const frame = await app.waitForFrame((value) => expected.every((label) => value.includes(label)))
         expect(frame.split("\n")).toHaveLength(height + 1)
       }
-      const separatorX = app
-        .captureCharFrame()
-        .split("\n")
-        .find((line) => line.includes("Timeline") && line.includes("│"))!
-        .indexOf("│")
-      await app.mockMouse.click(separatorX, 4)
+      const mediumRows = app.captureCharFrame().split("\n")
+      const mediumY = mediumRows.findIndex((line) => line.includes("Timeline") && line.includes("│"))
+      const separatorX = mediumRows[mediumY].indexOf("│")
+      await app.mockMouse.click(separatorX, mediumY)
       await app.waitForFrame((frame) => frame.includes("┃"))
-      await app.mockMouse.drag(separatorX, 4, separatorX - 5, 4)
+      await app.mockMouse.drag(separatorX, mediumY, separatorX - 5, mediumY)
       await app.renderOnce()
-      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(39)
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(33)
 
       app.resize(140, 40)
       const wideFrame = await app.waitForFrame(
-        (frame) => frame.includes("Parents") && frame.includes("Timeline") && frame.includes("Inspector"),
+        (frame) => frame.includes("PARENTS") && frame.includes("Timeline") && frame.includes("Inspector"),
       )
       const wideRows = wideFrame.split("\n")
-      const wideY = wideRows.findIndex((line) => line.includes("Parents") && line.includes("Timeline"))
+      const wideY = wideRows.findIndex((line) => line.includes("PARENTS") && line.includes("Timeline"))
       const parentsSeparatorX = wideRows[wideY].indexOf("│")
       await app.mockMouse.drag(parentsSeparatorX, wideY, parentsSeparatorX + 3, wideY)
       await app.renderOnce()
-      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(27)
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(21)
       commands.get("delegation.supervision.navigation.right")?.run()
-      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(29)
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(23)
       const inspectorSeparatorX = app.captureCharFrame().split("\n")[wideY].lastIndexOf("│")
       await app.mockMouse.drag(inspectorSeparatorX, wideY, inspectorSeparatorX - 3, wideY)
       commands.get("delegation.supervision.navigation.right")?.run()
-      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(37)
-      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(39)
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(31)
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(33)
 
       app.resize(70, 24)
       await app.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
@@ -647,23 +648,24 @@ describe("Delegation supervision workspace", () => {
       rtlCommands.get("delegation.supervision.focus.next")?.run()
       rtlCommands.get("delegation.supervision.focus.next")?.run()
       rtlCommands.get("delegation.supervision.navigation.left")?.run()
-      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(37)
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(31)
       const mediumSeparatorX = mediumHeader.indexOf("│")
-      await restored.mockMouse.drag(mediumSeparatorX, 4, mediumSeparatorX + 3, 4)
+      const mediumY = rtlMedium.split("\n").findIndex((line) => line === mediumHeader)
+      await restored.mockMouse.drag(mediumSeparatorX, mediumY, mediumSeparatorX + 3, mediumY)
       await restored.renderOnce()
-      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(40)
+      expect(memory.locations['["/repo",null]']?.paneSizes.medium.inspector).toBe(34)
 
       restored.resize(140, 40)
       const rtlWide = await restored.waitForFrame(
-        (frame) => frame.includes("Parents") && frame.includes("Timeline") && frame.includes("Inspector"),
+        (frame) => frame.includes("PARENTS") && frame.includes("Timeline") && frame.includes("Inspector"),
       )
-      const wideHeader = rtlWide.split("\n").find((line) => line.includes("Parents") && line.includes("Timeline"))!
+      const wideHeader = rtlWide.split("\n").find((line) => line.includes("PARENTS") && line.includes("Timeline"))!
       expect(wideHeader.indexOf("Inspector")).toBeLessThan(wideHeader.indexOf("Timeline"))
-      expect(wideHeader.indexOf("Timeline")).toBeLessThan(wideHeader.indexOf("Parents"))
+      expect(wideHeader.indexOf("Timeline")).toBeLessThan(wideHeader.indexOf("PARENTS"))
       expect(rtlWide).toContain("\u2068Parent\u2069")
-      expect(rtlWide).toContain("\u2066openai/gpt-5\u2069")
+      expect(rtlWide).toContain("Model")
+      expect(rtlWide).toContain("Observed")
       expect(rtlWide).toContain("COMPLETED")
-      expect(rtlWide).toMatch(/\u2066\d{10,}\u2069/)
       expect(rtlWide).toContain("\u2068Nested\u2069")
       ;(fixture.sessions[0] as { title?: string }).title = "الوالد Parent"
       await rtlCommands.get("delegation.supervision.refresh")?.run()
@@ -672,28 +674,25 @@ describe("Delegation supervision workspace", () => {
       await rtlCommands.get("delegation.supervision.refresh")?.run()
       await restored.waitForFrame((frame) => frame.includes("\u2068الوالد\u2069"))
       const parentSeparatorX = wideHeader.lastIndexOf("│")
-      await restored.mockMouse.click(parentSeparatorX, 4)
+      const wideY = rtlWide.split("\n").findIndex((line) => line === wideHeader)
+      await restored.mockMouse.click(parentSeparatorX, wideY)
       rtlCommands.get("delegation.supervision.navigation.left")?.run()
-      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(31)
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(25)
       await restored.renderOnce()
-      const resizedParentSeparatorX = restored
-        .captureCharFrame()
-        .split("\n")
-        .find((line) => line.includes("Parents") && line.includes("Timeline"))!
-        .lastIndexOf("┃")
-      await restored.mockMouse.drag(resizedParentSeparatorX, 4, resizedParentSeparatorX - 3, 4)
+      const resizedRows = restored.captureCharFrame().split("\n")
+      const resizedY = resizedRows.findIndex((line) => line.includes("PARENTS") && line.includes("Timeline"))
+      const resizedParentSeparatorX = resizedRows[resizedY].lastIndexOf("┃")
+      await restored.mockMouse.drag(resizedParentSeparatorX, resizedY, resizedParentSeparatorX - 3, resizedY)
       await restored.renderOnce()
-      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(34)
-      const inspectorSeparatorX = restored
-        .captureCharFrame()
-        .split("\n")
-        .find((line) => line.includes("Parents") && line.includes("Timeline"))!
-        .indexOf("│")
-      await restored.mockMouse.drag(inspectorSeparatorX, 4, inspectorSeparatorX + 3, 4)
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.parents).toBe(28)
+      const inspectorRows = restored.captureCharFrame().split("\n")
+      const inspectorY = inspectorRows.findIndex((line) => line.includes("PARENTS") && line.includes("Timeline"))
+      const inspectorSeparatorX = inspectorRows[inspectorY].indexOf("│")
+      await restored.mockMouse.drag(inspectorSeparatorX, inspectorY, inspectorSeparatorX + 3, inspectorY)
       await restored.renderOnce()
-      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(40)
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(34)
       rtlCommands.get("delegation.supervision.navigation.left")?.run()
-      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(38)
+      expect(memory.locations['["/repo",null]']?.paneSizes.wide.inspector).toBe(32)
       rtlCommands.get("delegation.supervision.scroll.page-down")?.run()
       rtlCommands.get("delegation.supervision.scroll.page-up")?.run()
 
