@@ -803,8 +803,8 @@ function SupervisionPage(props: {
             ? "error"
             : "info"
     return (
-      <text fg={theme.text.feedback[kind()].default} bg={theme.background.feedback[kind()].default} wrapMode="none">
-        {` ${label()} `}
+      <text fg={theme.text.feedback[kind()].default} wrapMode="none" marginRight={1}>
+        {`● ${label()}`}
       </text>
     )
   }
@@ -817,7 +817,7 @@ function SupervisionPage(props: {
         <For each={geometry().segments}>
           {(segment) => (
             <text fg={timelineColor(segment.label, theme)} wrapMode="none" onMouseUp={visualProps.onSelect}>
-              {segment.label + "━".repeat(Math.max(1, segment.width - 1))}
+              {timelineSegment(segment.label, segment.width)}
             </text>
           )}
         </For>
@@ -836,15 +836,20 @@ function SupervisionPage(props: {
     return (
       <box
         width={Math.max(12, Math.floor(((layout().inspector ?? layout().timeline) - 2) / 2))}
-        height={3}
+        height={2}
         minWidth={0}
-        paddingLeft={1}
-        paddingRight={1}
-        border={["top", "right", "bottom", "left"]}
+        paddingLeft={direction() === "rtl" ? 0 : 1}
+        paddingRight={direction() === "rtl" ? 1 : 0}
+        border={[direction() === "rtl" ? "right" : "left"]}
         borderColor={theme.border.default}
+        flexDirection="column"
+        backgroundColor={theme.background.surface.offset}
       >
+        <text fg={theme.text.subdued} wrapMode="none" truncate>
+          {cardProps.label}
+        </text>
         <text fg={theme.text.default} wrapMode="none" truncate>
-          {cardProps.label}: {cardProps.value}
+          {cardProps.value}
         </text>
       </box>
     )
@@ -859,22 +864,15 @@ function SupervisionPage(props: {
     const enabled = () => actionProps.enabled !== false
     const variant = actionProps.variant ?? "primary"
     return (
-      <box
-        height={3}
-        flexShrink={0}
-        paddingLeft={1}
-        paddingRight={1}
-        border={["top", "right", "bottom", "left"]}
-        borderColor={enabled() ? theme.text.action[variant].default : theme.border.default}
-        backgroundColor={enabled() ? theme.background.action[variant].default : undefined}
+      <text
+        fg={enabled() ? theme.text.action[variant].default : theme.text.subdued}
+        wrapMode="none"
         onMouseUp={() => {
           if (enabled()) actionProps.run()
         }}
       >
-        <text fg={enabled() ? theme.text.action[variant].default : theme.text.subdued} wrapMode="none">
-          {actionProps.label}
-        </text>
-      </box>
+        {enabled() ? `[ ${actionProps.label} ]` : `( ${actionProps.label} )`}
+      </text>
     )
   }
 
@@ -884,13 +882,13 @@ function SupervisionPage(props: {
     const recovery = () => recoveryControls(actionProps.operation, pending())
     const enabled = () => synchronization.mutationsEnabled()
     return (
-      <box flexDirection={rowDirection(direction())} flexWrap="wrap" flexShrink={0}>
+      <box flexDirection={rowDirection(direction())} flexWrap="wrap" flexShrink={0} gap={1}>
         <Show when={actionProps.operation.childID}>
-          <ActionControl label={`Open child Session ${ltrDirection("(Enter)")}`} run={forward} />
+          <ActionControl label="Open child" run={forward} />
         </Show>
         <Show when={controls().cancel}>
           <ActionControl
-            label={`Cancel operation ${ltrDirection("(Ctrl+X)")}`}
+            label="Cancel"
             run={cancelOperation}
             enabled={enabled()}
             variant="destructive"
@@ -898,15 +896,15 @@ function SupervisionPage(props: {
         </Show>
         <Show when={controls().steer}>
           <ActionControl
-            label={`Steer child Session ${ltrDirection("(Ctrl+S)")}`}
+            label="Steer"
             run={steerOperation}
             enabled={enabled()}
           />
         </Show>
         <Show when={recovery().retry}>
-          <ActionControl label={`Retry ${ltrDirection("(Ctrl+T)")}`} run={retryOperation} enabled={enabled()} />
+          <ActionControl label="Retry" run={retryOperation} enabled={enabled()} />
           <ActionControl
-            label={`Dismiss recovery ${ltrDirection("(Ctrl+D)")}`}
+            label="Dismiss recovery"
             run={dismissRecovery}
             enabled={enabled()}
             variant="destructive"
@@ -914,7 +912,7 @@ function SupervisionPage(props: {
         </Show>
         <Show when={linkedRetry()}>
           <ActionControl
-            label={`View retry ${ltrDirection("(Ctrl+V)")}`}
+            label="View retry"
             run={() => {
               const retry = linkedRetry()
               if (retry) reveal(retry.id)
@@ -1136,7 +1134,7 @@ function SupervisionPage(props: {
     return (
       <box width={layout().parents ?? layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
         <text fg={focus() === "parents" ? theme.text.default : theme.text.subdued}>Parents</text>
-        <scrollbox flexGrow={1} minHeight={0} scrollbarOptions={{ visible: true }}>
+        <scrollbox flexGrow={1} minHeight={0} scrollbarOptions={{ visible: false }}>
           <For each={ready()?.parents ?? []}>
             {(parent) => (
               <box
@@ -1148,7 +1146,7 @@ function SupervisionPage(props: {
               >
                 <text fg={selectedParent() === parent.session.id ? theme.text.default : theme.text.subdued} truncate>
                   {selectedParent() === parent.session.id ? (direction() === "rtl" ? " <" : "> ") : "  "}
-                  {parent.session.title ? autoDirection(parent.session.title) : ltrDirection(parent.session.id)}
+                  {parent.session.title ? autoDirection(parent.session.title) : ltrDirection(compactID(parent.session.id))}
                 </text>
                 <text fg={theme.text.subdued} truncate>
                   {ltrDirection(parent.counts.actionable)} actionable / {ltrDirection(parent.counts.total)} retained
@@ -1170,7 +1168,9 @@ function SupervisionPage(props: {
           <Show when={selectedParentRecord()}>
             {(parent: () => NonNullable<ReturnType<typeof selectedParentRecord>>) => (
               <text fg={theme.text.subdued} truncate>
-                {parent().session.title ? autoDirection(parent().session.title!) : ltrDirection(parent().session.id)}
+                {parent().session.title
+                  ? autoDirection(parent().session.title!)
+                  : ltrDirection(compactID(parent().session.id))}
               </text>
             )}
           </Show>
@@ -1192,12 +1192,12 @@ function SupervisionPage(props: {
           ref={(element) => (timelineScroll = element)}
           flexGrow={1}
           minHeight={0}
-          scrollbarOptions={{ visible: true }}
+          scrollbarOptions={{ visible: false }}
         >
           <For each={selectedParentRecord()?.batches ?? []}>
             {(item) => (
               <box flexDirection="column">
-                <text fg={theme.text.subdued}>Batch {ltrDirection(item.id)}</text>
+                <text fg={theme.text.subdued}>Batch {ltrDirection(compactID(item.id))}</text>
                 <For each={selectedParentRecord()?.operations.filter((operation) => operation.batchID === item.id) ?? []}>
                   {(operation) => (
                     <box
@@ -1263,12 +1263,15 @@ function SupervisionPage(props: {
   function InspectorPane() {
     return (
       <box width={layout().inspector ?? layout().timeline} minWidth={0} minHeight={0} flexDirection="column">
-        <text fg={focus() === "inspector" ? theme.text.default : theme.text.subdued}>Inspector</text>
+        <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
+          <text fg={focus() === "inspector" ? theme.text.default : theme.text.subdued}>Inspector</text>
+          <text fg={theme.text.subdued}>PgUp/PgDn</text>
+        </box>
         <scrollbox
           ref={(element) => (inspectorScroll = element)}
           flexGrow={1}
           minHeight={0}
-          scrollbarOptions={{ visible: true }}
+          scrollbarOptions={{ visible: false }}
         >
           <Show when={selectedOperation()}>
             {(operation: () => ProjectedOperation) => (
@@ -1276,11 +1279,11 @@ function SupervisionPage(props: {
                 <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
                   <StatusBadge operation={operation()} />
                   <text fg={theme.text.default} wrapMode="none" truncate>
-                    {ltrDirection(operation().id)}
+                    {ltrDirection(compactID(operation().id))}
                   </text>
                 </box>
                 <text fg={theme.text.subdued}>
-                  Batch {ltrDirection(operation().batchID)} | index {ltrDirection(operation().index)}
+                  Batch {ltrDirection(compactID(operation().batchID))} | index {ltrDirection(operation().index)}
                 </text>
                 <text fg={theme.text.default}>{autoDirection(operation().text)}</text>
                 <InspectorActions operation={operation()} />
@@ -1290,7 +1293,7 @@ function SupervisionPage(props: {
                     value={
                       selectedParentRecord()?.session.title
                         ? autoDirection(selectedParentRecord()?.session.title ?? "")
-                        : ltrDirection(operation().parentID)
+                        : ltrDirection(compactID(operation().parentID))
                     }
                   />
                   <FactCard label="Child Session" value={ltrDirection(operation().childID ?? "not started")} />
@@ -1302,25 +1305,17 @@ function SupervisionPage(props: {
                   />
                   <FactCard label="Observed" value={ltrDirection(observedAt())} />
                 </box>
-                <text fg={theme.text.subdued}>
-                  Parent {ltrDirection(operation().parentID)}
-                  {operation().childID ? ` | Child ${ltrDirection(operation().childID ?? "")}` : ""}
-                </text>
-                <text fg={theme.text.subdued}>
-                  Agent {ltrDirection(operation().agent)} | Model{" "}
-                  {ltrDirection(
-                    `${operation().model.providerID}/${operation().model.modelID}${operation().model.variant ? ` (${operation().model.variant})` : ""}`,
-                  )}
-                </text>
-                <text fg={theme.text.subdued}>
-                  State {ltrDirection(operation().presentationState)} | Observed {ltrDirection(observedAt())}
-                </text>
                 <text fg={theme.text.default}>Truthful timeline</text>
                 <TimelineVisual operation={operation()} />
                 <text fg={theme.text.subdued}>{ltrDirection(timelineTrack(operation(), observedAt()))}</text>
                 <For each={operationInspector(operation(), observedAt()).slice(5)}>
                   {(line) => <text fg={theme.text.subdued}>{line}</text>}
                 </For>
+                <text fg={theme.text.default}>Identifiers</text>
+                <text fg={theme.text.subdued}>Operation {ltrDirection(operation().id)}</text>
+                <text fg={theme.text.subdued}>Batch {ltrDirection(operation().batchID)}</text>
+                <text fg={theme.text.subdued}>Parent {ltrDirection(operation().parentID)}</text>
+                <text fg={theme.text.subdued}>Agent {ltrDirection(operation().agent)}</text>
                 <Show when={operation().childID}>
                   <Show when={selectedPermissions().length > 0}>
                     <text fg={theme.text.feedback.warning.default}>
@@ -1339,10 +1334,11 @@ function SupervisionPage(props: {
                           <box
                             flexDirection="column"
                             flexShrink={0}
-                            paddingLeft={1}
-                            paddingRight={1}
-                            border={["top", "right", "bottom", "left"]}
+                            paddingLeft={direction() === "rtl" ? 0 : 1}
+                            paddingRight={direction() === "rtl" ? 1 : 0}
+                            border={[direction() === "rtl" ? "right" : "left"]}
                             borderColor={theme.text.feedback.warning.default}
+                            backgroundColor={theme.background.surface.offset}
                           >
                             <For each={permissionInspector(request, permissionControls.isPending(request.id))}>
                               {(line) => <text fg={theme.text.subdued}>{ltrDirection(line)}</text>}
@@ -1442,18 +1438,18 @@ function SupervisionPage(props: {
       <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
         <text fg={theme.text.default}>Delegation supervision</text>
         <text fg={freshness() === "live" ? theme.text.subdued : theme.text.feedback.warning.default}>
-          {freshness() === "loading" ? "Loading" : freshness() === "live" ? "Live" : freshness() === "stale" ? "Stale" : "Degraded"}
+          {freshness() === "loading" ? "LOADING" : freshness() === "live" ? "LIVE" : freshness() === "stale" ? "STALE" : "DEGRADED"}
         </text>
       </box>
       <box flexDirection={rowDirection(direction())} gap={1} flexShrink={0}>
-        <text fg={theme.text.subdued} onMouseUp={searchHistory}>
-          Search: {search() ? autoDirection(search()) : "all"} {ltrDirection("(Ctrl+F)")}
+        <text fg={theme.text.action.primary.default} onMouseUp={searchHistory}>
+          [ Search: {search() ? autoDirection(search()) : "all"} ^F ]
         </text>
-        <text fg={theme.text.subdued} onMouseUp={() => setActionableOnly((value) => !value)}>
-          {actionableOnly() ? "actionable only" : "all states"} {ltrDirection("(Ctrl+A)")}
+        <text fg={theme.text.action.primary.default} onMouseUp={() => setActionableOnly((value) => !value)}>
+          [ {actionableOnly() ? "Actionable" : "All states"} ^A ]
         </text>
-        <text fg={theme.text.subdued} onMouseUp={() => synchronization.request()}>
-          Refresh {ltrDirection("(Ctrl+R)")}
+        <text fg={theme.text.action.primary.default} onMouseUp={() => synchronization.request()}>
+          [ Refresh ^R ]
         </text>
       </box>
       <Show when={freshness() !== "loading"}>
@@ -1463,7 +1459,7 @@ function SupervisionPage(props: {
             {selectedParentRecord()?.session.title
               ? autoDirection(selectedParentRecord()!.session.title!)
               : selectedParentRecord()?.session.id
-                ? ltrDirection(selectedParentRecord()!.session.id)
+                ? ltrDirection(compactID(selectedParentRecord()!.session.id))
                 : "none"}{" "}
             | {ltrDirection(selectedParentRecord()?.counts.actionable ?? 0)} actionable /{" "}
             {ltrDirection(selectedParentRecord()?.counts.total ?? 0)} retained (select)
@@ -1594,8 +1590,11 @@ function timelineGeometry(operation: ProjectedOperation, observedAt: number, wid
   ].filter((value): value is NonNullable<typeof value> => value !== undefined)
   const durations = intervals.map((interval) => Math.max(0, interval.end - interval.start))
   const total = Math.max(1, durations.reduce((sum, value) => sum + value, 0))
-  const available = Math.max(0, width - intervals.length * 2)
-  const initial = durations.map((value) => 2 + Math.floor((value / total) * available))
+  const labels = { Q: "QUEUE", S: "START", R: "RUN", F: "FINAL" } as const
+  const readable = intervals.map((interval) => labels[interval.label].length + 1)
+  const minimum = readable.reduce((sum, value) => sum + value, 0) <= width ? readable : intervals.map(() => 2)
+  const available = Math.max(0, width - minimum.reduce((sum, value) => sum + value, 0))
+  const initial = durations.map((value, index) => minimum[index] + Math.floor((value / total) * available))
   const used = initial.reduce((sum, value) => sum + value, 0)
   const widths = initial.map((value, index) => (index === initial.length - 1 ? value + width - used : value))
   const span = Math.max(1, end - timeline.admittedAt)
@@ -1622,6 +1621,12 @@ function timelineColor(label: "Q" | "S" | "R" | "F", theme: Context["theme"]) {
   if (label === "S") return theme.text.feedback.info.default
   if (label === "R") return theme.text.feedback.success.default
   return theme.text.feedback.warning.default
+}
+
+function timelineSegment(label: "Q" | "S" | "R" | "F", width: number) {
+  const name = { Q: "QUEUE", S: "START", R: "RUN", F: "FINAL" }[label]
+  const text = width >= name.length + 1 ? name : label
+  return text + "━".repeat(Math.max(1, width - text.length))
 }
 
 export function operationInspector(operation: ProjectedOperation, observedAt: number) {
@@ -1652,6 +1657,11 @@ export function operationInspector(operation: ProjectedOperation, observedAt: nu
 
 function duration(label: string, start: number, end: number) {
   return `${label} ${Math.max(0, end - start)}ms`
+}
+
+function compactID(value: string) {
+  if (value.length <= 20) return value
+  return `${value.slice(0, 10)}...${value.slice(-6)}`
 }
 
 function failureGuidance(code: SynchronizationFailure["code"] | undefined) {

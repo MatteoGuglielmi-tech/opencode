@@ -441,6 +441,7 @@ describe("Delegation supervision workspace", () => {
           },
         },
         background: {
+          surface: { offset: "#111111" },
           action: {
             primary: { default: "#224466" },
             destructive: { default: "#662222" },
@@ -507,13 +508,13 @@ describe("Delegation supervision workspace", () => {
       const commands = new Map(layers.flatMap((layer) => layer.commands ?? []).map((command) => [command.id, command]))
       commands.get("delegation.supervision.focus.next")?.run()
       commands.get("delegation.supervision.navigation.previous")?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("index 0"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("> first"))
       commands.get("delegation.supervision.navigation.next")?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("index 1"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("> second"))
       commands.get("delegation.supervision.navigation.previous")?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("index 0"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("> first"))
       commands.get("delegation.supervision.navigation.next")?.run()
-      await app.waitForFrame((frame) => bidiPlain(frame).includes("index 1"))
+      await app.waitForFrame((frame) => bidiPlain(frame).includes("> second"))
       commands.get("delegation.supervision.scroll.page-down")?.run()
       commands.get("delegation.supervision.scroll.page-up")?.run()
       const search = layers
@@ -523,14 +524,14 @@ describe("Delegation supervision workspace", () => {
       app.resize(100, 30)
       const visual = await app.waitForFrame((frame) => bidiPlain(frame).includes("Search: nested"))
       expect(visual).toContain("COMPLETED")
-      expect(visual).toMatch(/Q━+S━+R━+F━+/)
-      expect(visual).toContain("┌")
+      expect(visual).toMatch(/QUEUE━+START━+RUN━+FINAL━+/)
+      expect(visual).toContain("│ Parent")
       expect(visual).toContain("Observed")
-      expect(visual.indexOf("Open child Session")).toBeLessThan(visual.indexOf("Truthful timeline"))
+      expect(visual.indexOf("Open child")).toBeLessThan(visual.indexOf("Truthful timeline"))
       commands.get("delegation.supervision.focus.next")?.run()
       commands.get("delegation.supervision.focus.next")?.run()
       commands.get("delegation.supervision.scroll.page-down")?.run()
-      await app.waitForFrame((frame) => frame.includes("Open child Session"))
+      await app.waitForFrame((frame) => frame.includes("Open child"))
       commands.get("delegation.supervision.scroll.page-up")?.run()
       commands.get("delegation.supervision.focus.previous")?.run()
       commands.get("delegation.supervision.focus.previous")?.run()
@@ -658,10 +659,10 @@ describe("Delegation supervision workspace", () => {
       expect(wideHeader.indexOf("Inspector")).toBeLessThan(wideHeader.indexOf("Timeline"))
       expect(wideHeader.indexOf("Timeline")).toBeLessThan(wideHeader.indexOf("Parents"))
       expect(rtlWide).toContain("\u2068Parent\u2069")
-      expect(rtlWide).toContain("Model \u2066openai/gpt-")
-      expect(rtlWide).toContain("State \u2066terminal\u2069 | Observed")
+      expect(rtlWide).toContain("\u2066openai/gpt-5\u2069")
+      expect(rtlWide).toContain("COMPLETED")
       expect(rtlWide).toMatch(/\u2066\d{10,}\u2069/)
-      expect(rtlWide).toContain("Parent \u2066ses_nested\u2069")
+      expect(rtlWide).toContain("\u2068Nested\u2069")
       ;(fixture.sessions[0] as { title?: string }).title = "الوالد Parent"
       await rtlCommands.get("delegation.supervision.refresh")?.run()
       await restored.waitForFrame((frame) => frame.includes("\u2068الوالد Parent\u2069"))
@@ -701,7 +702,7 @@ describe("Delegation supervision workspace", () => {
       rtlCommands.get("delegation.supervision.child.open")?.run()
       restored.resize(50, 16)
       await restored.waitForFrame(
-        (frame) => frame.includes("> Back") && frame.includes("Inspector") && frame.includes("Parent:"),
+        (frame) => frame.includes("> Back") && frame.includes("Inspector") && frame.includes("Child Session"),
       )
       rtlCommands.get("delegation.supervision.back")?.run()
       await restored.waitForFrame((frame) => frame.includes("Timeline") && !frame.includes("Inspector"))
