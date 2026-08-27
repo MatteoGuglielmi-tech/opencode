@@ -10,9 +10,11 @@ import { Updater } from "../../services/updater"
 import { UpdatePreflight } from "../../services/update-preflight"
 import { Npm } from "@opencode-ai/util/npm"
 import { OPENCODE_CHANNEL, OPENCODE_VERSION } from "../../version"
+import { reexecForHerdr } from "../../herdr"
 
 export default Runtime.handler(Commands, (input) =>
   Effect.gen(function* () {
+    reexecForHerdr()
     const requestedDirectory = Option.getOrUndefined(input.directory)
     if (requestedDirectory !== undefined) process.chdir(requestedDirectory)
     const preflight = UpdatePreflight.make()

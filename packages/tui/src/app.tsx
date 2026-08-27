@@ -38,6 +38,7 @@ import {
   TuiStartupProvider,
   TuiTerminalEnvironmentProvider,
   useTuiApp,
+  useTuiLifecycle,
   useTuiPaths,
   useTuiStartup,
   type TuiApp,
@@ -98,6 +99,7 @@ import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-wi
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 import { AttentionProvider } from "./context/attention"
+import { createHerdrReporter, startHerdrReporting } from "./herdr"
 import { StorageProvider } from "./context/storage"
 import { createTuiClipboard } from "./clipboard"
 
@@ -473,11 +475,25 @@ function App(props: { pair?: DialogPairCredentials }) {
   const theme = useTheme()
   const { mode, supports, setMode, locked, lock, unlock } = useThemes()
   const data = useData()
+  const lifecycle = useTuiLifecycle()
   const location = useLocation()
   const exit = useExit()
   const promptRef = usePromptRef()
   const plugins = usePlugin()
   const clipboard = useClipboard()
+  startHerdrReporting({
+    reporter: createHerdrReporter(),
+    lifecycle,
+    projection: () => ({
+      selectedSessionID: route.data.type === "session" ? route.data.sessionID : undefined,
+      root: data.session.root,
+      family: data.session.family,
+      status: data.session.status,
+      pending: (sessionID) => data.session.pending.list(sessionID).length,
+      permissions: (sessionID) => data.session.permission.list(sessionID)?.length ?? 0,
+      forms: (sessionID) => data.session.form.list(sessionID)?.length ?? 0,
+    }),
+  })
   let openingOpen: Promise<SessionInfo[]> | undefined
   // Toast once when an MCP server enters a failed or needs-auth state so the user knows to act,
   // without having to open the status panel. Tracking the last alerted status avoids re-toasting

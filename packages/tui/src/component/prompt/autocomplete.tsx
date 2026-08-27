@@ -60,6 +60,18 @@ type AutocompleteResults = {
   resolved: boolean
 }
 
+export function reconcileSlashCatalog<Command extends { name: string }, Skill extends { id: string; slash?: boolean }>(
+  commands: readonly Command[],
+  skills: readonly Skill[],
+) {
+  const slashSkills = skills.filter((skill) => skill.slash)
+  const names = new Set(slashSkills.map((skill) => skill.id))
+  return {
+    commands: commands.filter((command) => !names.has(command.name)),
+    skills: slashSkills,
+  }
+}
+
 export function Autocomplete(props: {
   value: string
   sessionID?: string
@@ -526,10 +538,12 @@ export function Autocomplete(props: {
         onSelect: slash.arguments ? () => insertSlash(slash.name) : command.run,
       }
     })
-    const commandNames = new Set<string>()
+    const catalog = reconcileSlashCatalog(
+      data.location.command.list(location.current) ?? [],
+      data.location.skill.list(location.current) ?? [],
+    )
 
-    for (const serverCommand of data.location.command.list(location.current) ?? []) {
-      commandNames.add(serverCommand.name)
+    for (const serverCommand of catalog.commands) {
       results.push({
         display: "/" + serverCommand.name,
         description: serverCommand.description,
@@ -537,9 +551,7 @@ export function Autocomplete(props: {
       })
     }
 
-    for (const skill of data.location.skill
-      .list(location.current)
-      ?.filter((skill) => skill.slash === true && !commandNames.has(skill.id)) ?? []) {
+    for (const skill of catalog.skills) {
       results.push({
         display: "/" + skill.id,
         description: skill.description,

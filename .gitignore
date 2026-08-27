@@ -30,6 +30,7 @@ target
 .direnv/
 
 # Local dev files
+/AGENTS.md
 opencode-dev
 UPCOMING_CHANGELOG.md
 logs/
