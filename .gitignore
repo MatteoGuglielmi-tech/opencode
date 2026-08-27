@@ -30,9 +30,11 @@ target
 .direnv/
 
 # Local dev files
-/AGENTS.md
 opencode-dev
 UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+.codegraph/
+packages/delegation/acceptance/
