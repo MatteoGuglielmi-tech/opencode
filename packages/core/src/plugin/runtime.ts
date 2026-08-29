@@ -2,10 +2,12 @@ export * as PluginRuntime from "./runtime.js"
 
 import { Context, Effect, Layer } from "effect"
 import { Agent } from "../agent.js"
+import { Catalog } from "../catalog.js"
 import { makeGlobalNode } from "@opencode-ai/util/effect/app-node"
 import { Job } from "../job.js"
 import { Location } from "../location.js"
 import { LocationServiceMap } from "../location-service-map.js"
+import { Model } from "../model.js"
 import { Session } from "../session.js"
 
 export interface Interface {
@@ -31,6 +33,16 @@ export interface Interface {
       readonly list: (
         ref: Location.Ref,
       ) => Effect.Effect<{ readonly location: Location.Info; readonly data: Agent.Info[] }>
+    }
+    readonly catalog: {
+      readonly model: {
+        readonly list: (
+          ref: Location.Ref,
+        ) => Effect.Effect<{ readonly location: Location.Info; readonly data: Model.Info[] }>
+        readonly default: (
+          ref: Location.Ref,
+        ) => Effect.Effect<{ readonly location: Location.Info; readonly data: Model.Info | undefined }>
+      }
     }
   }
 }
@@ -83,6 +95,12 @@ export const layerWithCell = (cell: Cell) =>
         agent: {
           list: (ref) => require(cell, (runtime) => runtime.location.agent.list(ref)),
         },
+        catalog: {
+          model: {
+            list: (ref) => require(cell, (runtime) => runtime.location.catalog.model.list(ref)),
+            default: (ref) => require(cell, (runtime) => runtime.location.catalog.model.default(ref)),
+          },
+        },
       },
     }),
   )
@@ -111,6 +129,36 @@ export const providerLayerWithCell = (cell: Cell) =>
                   data: yield* agents.list(),
                 }
               }).pipe(Effect.provide(locations.get(ref)), Effect.orDie),
+          },
+          catalog: {
+            model: {
+              list: (ref) =>
+                Effect.gen(function* () {
+                  const location = yield* Location.Service
+                  const catalog = yield* Catalog.Service
+                  return {
+                    location: new Location.Info({
+                      directory: location.directory,
+                      workspaceID: location.workspaceID,
+                      project: location.project,
+                    }),
+                    data: yield* catalog.model.available(),
+                  }
+                }).pipe(Effect.provide(locations.get(ref)), Effect.orDie),
+              default: (ref) =>
+                Effect.gen(function* () {
+                  const location = yield* Location.Service
+                  const catalog = yield* Catalog.Service
+                  return {
+                    location: new Location.Info({
+                      directory: location.directory,
+                      workspaceID: location.workspaceID,
+                      project: location.project,
+                    }),
+                    data: yield* catalog.model.default(),
+                  }
+                }).pipe(Effect.provide(locations.get(ref)), Effect.orDie),
+            },
           },
         },
       }

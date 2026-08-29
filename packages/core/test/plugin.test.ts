@@ -51,6 +51,56 @@ describe("Plugin", () => {
     }),
   )
 
+  it.effect("routes explicit model catalog reads to their Location", () =>
+    Effect.gen(function* () {
+      const plugins = yield* Plugin.Service
+      const runtime = yield* PluginRuntime.Service
+      const location = yield* Location.Service
+      const ref = Location.Ref.make({ directory: AbsolutePath.make("/other") })
+      const model = Model.Info.make({
+        ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make("gpt-location")),
+        modelID: Model.ID.make("gpt-location"),
+      })
+      const host = yield* PluginHost.make(plugins).pipe(
+        Effect.provideService(
+          PluginRuntime.Service,
+          PluginRuntime.Service.of({
+            ...runtime,
+            location: {
+              ...runtime.location,
+              catalog: {
+                model: {
+                  list: () =>
+                    Effect.succeed({
+                      location: new Location.Info({
+                        directory: ref.directory,
+                        workspaceID: ref.workspaceID,
+                        project: location.project,
+                      }),
+                      data: [model],
+                    }),
+                  default: () =>
+                    Effect.succeed({
+                      location: new Location.Info({
+                        directory: ref.directory,
+                        workspaceID: ref.workspaceID,
+                        project: location.project,
+                      }),
+                      data: model,
+                    }),
+                },
+              },
+            },
+          } as PluginRuntime.Interface),
+        ),
+      )
+
+      expect(
+        (yield* host.catalog.model.list({ location: { directory: ref.directory } })).data.map((item) => item.id),
+      ).toEqual([model.id])
+    }),
+  )
+
   it.effect("resumes execution and cancels pending inbox work through the Effect plugin boundary", () =>
     Effect.gen(function* () {
       const plugins = yield* Plugin.Service

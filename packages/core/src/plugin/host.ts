@@ -145,8 +145,16 @@ export const make = Effect.fn("PluginHost.make")(function* (
             ),
       },
       model: {
-        list: () => response(catalog.model.available()),
-        default: () => response(catalog.model.default()),
+        list: (input) => {
+          const ref = locationRef(input)
+          if (ref && !isCurrentLocation(ref)) return runtime.location.catalog.model.list(ref)
+          return response(catalog.model.available())
+        },
+        default: (input) => {
+          const ref = locationRef(input)
+          if (ref && !isCurrentLocation(ref)) return runtime.location.catalog.model.default(ref)
+          return response(catalog.model.default())
+        },
       },
       reload: catalog.reload,
       transform: (callback) =>
