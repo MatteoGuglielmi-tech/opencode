@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "provider": {},
+  "providers": {},
   "permission": {},
   "references": {
     "effect": {
@@ -16,5 +16,8 @@
   "tools": {
     "github-triage": false,
     "github-pr-search": false,
+  },
+  "experimental": {
+    "subagent_depth": 2,
   },
 }
