@@ -38,3 +38,9 @@ tsconfig.tsbuildinfo
 
 .codegraph/
 packages/delegation/acceptance/
+/.scratch/
+/docs/
+/specs/
+/plans/
+/perf/
+/README.*.md
