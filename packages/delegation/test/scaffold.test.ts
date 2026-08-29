@@ -3,8 +3,10 @@ import { Database } from "bun:sqlite"
 import { mkdir, mkdtemp, rm, stat, utimes } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { Effect } from "effect"
-import Plugin from "../src/plugin"
+import { Plugin } from "@opencode-ai/plugin/effect"
+import type { CommandExecutor, CommandRegistrationOptions } from "@opencode-ai/plugin/effect/command"
+import { Effect, Logger } from "effect"
+import DelegationPlugin from "../src/plugin"
 import { decode } from "../src/config"
 import { developmentConfig, initializeProfile } from "../src/distribution"
 import { acquire, degrade, supervise } from "../src/runtime"
@@ -307,8 +309,40 @@ describe("delegation package scaffold", () => {
   })
 
   test("exports one stable Effect plugin", () => {
-    expect(Plugin.id).toBe("opencode.delegation")
-    expect(typeof Plugin.effect).toBe("function")
+    expect(DelegationPlugin.id).toBe("opencode.delegation")
+    expect(typeof DelegationPlugin.effect).toBe("function")
+  })
+
+  test("keeps only the control transport out of command discovery", async () => {
+    const registrations: Array<{ readonly name: string; readonly options?: CommandRegistrationOptions }> = []
+    const context = {
+      options: { profile: "invalid" },
+      command: {
+        register: (name: string, _execute: CommandExecutor, options?: CommandRegistrationOptions) =>
+          Effect.sync(() => {
+            registrations.push({ name, ...(options === undefined ? {} : { options }) })
+            return { dispose: Effect.void }
+          }),
+      },
+      plugin: {
+        query: {
+          register: () => Effect.succeed({ dispose: Effect.void }),
+        },
+      },
+    }
+
+    await Effect.runPromise(
+      // Only command and query registration are evaluated after intentionally degraded activation.
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+      Effect.scoped(DelegationPlugin.effect(context as unknown as Plugin.Context)).pipe(
+        Effect.provide(Logger.layer([])),
+      ),
+    )
+
+    expect(registrations).toEqual([
+      { name: "delegate" },
+      { name: "delegation", options: { discoverable: false } },
+    ])
   })
 })
 

@@ -92,11 +92,13 @@ describe("fromPromise", () => {
     Effect.gen(function* () {
       let executor: Command.Executor | undefined
       let disposed = false
+      let options: { readonly discoverable?: boolean } | undefined
       const host = testHost({
         command: {
-          register: (_name, execute) =>
+          register: (_name, execute, input) =>
             Effect.sync(() => {
               executor = execute
+              options = input
               return { dispose: Effect.sync(() => (disposed = true)) }
             }),
         },
@@ -107,17 +109,21 @@ describe("fromPromise", () => {
         define({
           id: "promise-command",
           setup: async (ctx) => {
-            registration = await ctx.command.register("execute", async (input, context) => {
-              seen = { input, signal: context.signal }
-              return {
-                id: "msg_result",
-                sessionID: input.sessionID,
-                timeCreated: 0,
-                type: "synthetic",
-                payload: { text: "executed" },
-                delivery: "queue",
-              }
-            })
+            registration = await ctx.command.register(
+              "execute",
+              async (input, context) => {
+                seen = { input, signal: context.signal }
+                return {
+                  id: "msg_result",
+                  sessionID: input.sessionID,
+                  timeCreated: 0,
+                  type: "synthetic",
+                  payload: { text: "executed" },
+                  delivery: "queue",
+                }
+              },
+              { discoverable: false },
+            )
           },
         }),
       ).effect(host)
@@ -152,6 +158,7 @@ describe("fromPromise", () => {
         }),
       )
       expect(seen).toEqual({ input, signal: expect.any(AbortSignal) })
+      expect(options).toEqual({ discoverable: false })
       yield* Effect.promise(() => activeRegistration.dispose())
       expect(disposed).toBe(true)
     }),

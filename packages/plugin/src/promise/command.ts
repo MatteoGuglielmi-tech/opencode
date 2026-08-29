@@ -9,6 +9,10 @@ export type CommandExecutor = (
   context: { readonly signal: AbortSignal },
 ) => Promise<CommandExecutionResult>
 
+export interface CommandRegistrationOptions {
+  readonly discoverable?: boolean
+}
+
 export interface CommandDraft {
   list(): readonly CommandInfo[]
   get(name: string): CommandInfo | undefined
@@ -17,7 +21,11 @@ export interface CommandDraft {
 }
 
 export interface CommandDomain extends CommandApi {
-  readonly register: (name: string, execute: CommandExecutor) => Promise<Registration>
+  readonly register: (
+    name: string,
+    execute: CommandExecutor,
+    options?: CommandRegistrationOptions,
+  ) => Promise<Registration>
   readonly transform: Transform<CommandDraft>
   readonly reload: () => Promise<void>
 }

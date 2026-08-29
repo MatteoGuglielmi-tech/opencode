@@ -90,10 +90,13 @@ export function fromPromise(plugin: PluginDefinition) {
           },
           command: {
             list: (input) => run(host.command.list(input)),
-            register: (name, execute) =>
+            register: (name, execute, options) =>
               register(
-                host.command.register(name, (input) =>
-                  attempt((signal) => execute(wire(input), { signal })).pipe(Effect.map(commandResult)),
+                host.command.register(
+                  name,
+                  (input) =>
+                    attempt((signal) => execute(wire(input), { signal })).pipe(Effect.map(commandResult)),
+                  options,
                 ),
               ),
             transform: transform(host.command),

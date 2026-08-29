@@ -325,7 +325,7 @@ export default Plugin.define({
           }),
         ),
       )
-    })
+    }, { discoverable: false })
     if (lease.health.status === "degraded")
       yield* Effect.logError("Delegation coordinator is unavailable", lease.health)
   }),

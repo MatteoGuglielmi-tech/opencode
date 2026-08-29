@@ -136,11 +136,38 @@ describe("Command", () => {
     }),
   )
 
+  it.effect("executes non-discoverable commands without synthesizing command metadata", () =>
+    Effect.gen(function* () {
+      const command = yield* Command.Service
+      const registration = yield* command.register("execute", () => Effect.succeed(output), { discoverable: false })
+
+      expect(yield* command.execute(input)).toEqual(output)
+      expect(yield* command.get("execute")).toBeUndefined()
+      expect(yield* command.list()).toEqual([])
+
+      yield* command.transform((draft) =>
+        draft.update("execute", (command) => {
+          command.template = "Visible static command"
+        }),
+      )
+      expect(yield* command.get("execute")).toEqual({ name: "execute", template: "Visible static command" })
+      expect(yield* command.list()).toEqual([{ name: "execute", template: "Visible static command" }])
+
+      yield* command.transform((draft) => draft.remove("execute"))
+      yield* registration.dispose
+      yield* command.register("execute", () => Effect.succeed(output))
+      expect(yield* command.get("execute")).toEqual({ name: "execute", template: "" })
+      expect(yield* command.list()).toEqual([{ name: "execute", template: "" }])
+    }),
+  )
+
   it.effect("rejects duplicates without replacing the active executor", () =>
     Effect.gen(function* () {
       const command = yield* Command.Service
       yield* command.register("execute", () => Effect.succeed(output))
-      const duplicate = yield* command.register("execute", () => Effect.die("replacement")).pipe(Effect.exit)
+      const duplicate = yield* command
+        .register("execute", () => Effect.die("replacement"), { discoverable: false })
+        .pipe(Effect.exit)
 
       expect(Exit.isFailure(duplicate)).toBe(true)
       expect(yield* command.execute(input)).toEqual(output)

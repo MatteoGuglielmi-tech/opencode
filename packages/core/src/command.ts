@@ -44,6 +44,10 @@ export type ExecutionInput = {
 export type ExecutionResult = SessionInbox.User | SessionInbox.Synthetic
 export type Executor = (input: ExecutionInput) => Effect.Effect<ExecutionResult, unknown>
 
+export interface RegistrationOptions {
+  readonly discoverable?: boolean
+}
+
 export type Data = {
   commands: Map<string, Types.DeepMutable<Info>>
 }
@@ -69,6 +73,7 @@ export interface Interface extends State.Transformable<Draft> {
   readonly register: (
     name: string,
     execute: Executor,
+    options?: RegistrationOptions,
   ) => Effect.Effect<{ readonly dispose: Effect.Effect<void> }, never, Scope.Scope>
   readonly execute: (input: ExecutionInput) => Effect.Effect<ExecutionResult | undefined, EvaluationError>
   readonly get: (name: string) => Effect.Effect<Info | undefined>
@@ -92,6 +97,7 @@ export const layer = (options?: ShellSelect.Options) =>
       const location = yield* Location.Service
       const global = yield* Global.Service
       const executors = new Map<string, Executor>()
+      const nonDiscoverable = new Set<string>()
       const state = State.create<Data, Draft>({
         name: "command",
         initial: () => ({ commands: new Map() }),
@@ -124,18 +130,21 @@ export const layer = (options?: ShellSelect.Options) =>
       return Service.of({
         reload: state.reload,
         transform: state.transform,
-        register: Effect.fn("Command.register")(function* (name, execute) {
+        register: Effect.fn("Command.register")(function* (name, execute, options) {
           const scope = yield* Scope.Scope
           return yield* Effect.uninterruptible(
             Effect.gen(function* () {
               if (executors.has(name))
                 return yield* Effect.die(new Error(`Command executor already registered: ${name}`))
               executors.set(name, execute)
+              if (options?.discoverable === false) nonDiscoverable.add(name)
               let active = true
               const dispose = Effect.sync(() => {
                 if (!active) return
                 active = false
-                if (executors.get(name) === execute) executors.delete(name)
+                if (executors.get(name) !== execute) return
+                executors.delete(name)
+                nonDiscoverable.delete(name)
               })
               yield* Scope.addFinalizer(scope, dispose)
               return { dispose }
@@ -158,14 +167,14 @@ export const layer = (options?: ShellSelect.Options) =>
         get: Effect.fn("Command.get")(function* (name) {
           const command = staticCommand(name)
           if (command) return command
-          if (executors.has(name)) return Info.make({ name, template: "" })
+          if (executors.has(name) && !nonDiscoverable.has(name)) return Info.make({ name, template: "" })
           return (yield* mcpCommands()).find((command) => command.name === name)
         }),
         list: Effect.fn("Command.list")(function* () {
           const commands = Array.from(state.get().commands.values()) as Info[]
           const names = new Set(commands.map((command) => command.name))
           const executable = Array.from(executors.keys())
-            .filter((name) => !names.has(name))
+            .filter((name) => !names.has(name) && !nonDiscoverable.has(name))
             .map((name) => Info.make({ name, template: "" }))
           executable.forEach((command) => names.add(command.name))
           return [...commands, ...executable, ...(yield* mcpCommands()).filter((command) => !names.has(command.name))]
