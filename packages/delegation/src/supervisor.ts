@@ -70,6 +70,20 @@ export type SupervisorEvent =
 
 export class DefinitePromptError extends Error {}
 
+export function classifyPromptFailure(cause: unknown) {
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "_tag" in cause &&
+    (cause._tag === "Session.NotFoundError" ||
+      cause._tag === "Session.PromptConflictError" ||
+      cause._tag === "Session.AttachmentError" ||
+      cause._tag === "Session.SkillNotFoundError")
+  )
+    return new DefinitePromptError(cause instanceof Error ? cause.message : "Prompt admission failed", { cause })
+  return cause
+}
+
 export class Supervisor {
   readonly #permissions = new Map<string, Set<string>>()
   readonly #resolvedPermissions = new Map<string, Set<string>>()

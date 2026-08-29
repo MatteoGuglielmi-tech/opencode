@@ -364,6 +364,50 @@ describe("delegation admission", () => {
     await store.close()
   })
 
+  test("reconciles parent-relative selectors after the parent changes", async () => {
+    await using tmp = await tempDirectory()
+    const options = decode({ profile: tmp.path, store: path.join(tmp.path, "coordinator.sqlite"), concurrency: 2 })
+    await initialize(options)
+    const store = await open(options)
+    const input = {
+      sessionID: "ses_parent",
+      id: "msg_parent_drift",
+      arguments: 'agent=parent model=gpt-5 task="check api"',
+    }
+    const first = await Effect.runPromise(
+      execute(
+        input,
+        {
+          parent: () => Effect.succeed({ agent: "general", model: { providerID: "openai", id: "gpt-5" } }),
+          agents: () => Effect.succeed([{ id: "general", name: "General", mode: "subagent" as const }]),
+          models: () => Effect.succeed([{ providerID: "openai", id: "gpt-5", variants: [] }]),
+          defaultModel: () => Effect.succeed(undefined),
+          skills: () => Effect.succeed([]),
+          synthetic: () => Effect.fail(new Error("delivery unavailable")),
+        },
+        store,
+      ).pipe(Effect.flip),
+    )
+    expect(first).toMatchObject({ code: "receipt_pending" })
+
+    const retry = await Effect.runPromise(
+      execute(
+        input,
+        {
+          parent: () => Effect.succeed({ agent: "reviewer", model: { providerID: "anthropic", id: "claude" } }),
+          agents: () => Effect.succeed([]),
+          models: () => Effect.succeed([]),
+          defaultModel: () => Effect.succeed(undefined),
+          skills: () => Effect.succeed([]),
+          synthetic: (receipt: Record<string, unknown>) => Effect.succeed(receipt),
+        },
+        store,
+      ),
+    )
+    expect(retry).toMatchObject({ description: "Delegation admitted", resume: false })
+    await store.close()
+  })
+
   test("keeps later receipts blocked behind the earliest unacknowledged receipt", async () => {
     await using tmp = await tempDirectory()
     const options = decode({

@@ -6,9 +6,17 @@ import os from "node:os"
 import path from "node:path"
 import { decode } from "../src/config"
 import { initialize, open } from "../src/storage"
-import { DefinitePromptError, type Services, Supervisor } from "../src/supervisor"
+import { classifyPromptFailure, DefinitePromptError, type Services, Supervisor } from "../src/supervisor"
 
 describe("delegation supervision", () => {
+  test("classifies only known pre-admission prompt failures as definite", () => {
+    const uncertain = new Error("connection closed after request write")
+    expect(classifyPromptFailure({ _tag: "Session.PromptConflictError", message: "conflicting prompt" })).toBeInstanceOf(
+      DefinitePromptError,
+    )
+    expect(classifyPromptFailure(uncertain)).toBe(uncertain)
+  })
+
   test("claims acknowledged work in per-parent FIFO order up to the configured capacity", async () => {
     await using tmp = await tempDirectory()
     const options = decode({

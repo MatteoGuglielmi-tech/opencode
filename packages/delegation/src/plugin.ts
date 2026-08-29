@@ -6,7 +6,7 @@ import { decode } from "./config.js"
 import { DelegationControl } from "./control.js"
 import { acquire, degrade, supervise, type Lease } from "./runtime.js"
 import { isStorageFailure, storageFailureCause } from "./storage.js"
-import { DefinitePromptError, Supervisor } from "./supervisor.js"
+import { classifyPromptFailure, Supervisor } from "./supervisor.js"
 import { workspaceQuery } from "./supervision.js"
 
 export default Plugin.define({
@@ -110,12 +110,7 @@ export default Plugin.define({
                     sessionID: Session.ID.make(input.sessionID),
                     id: SessionMessage.ID.make(input.id),
                   })
-                  .pipe(
-                    Effect.mapError(
-                      (cause) =>
-                        new DefinitePromptError(cause instanceof Error ? cause.message : String(cause), { cause }),
-                    ),
-                  ),
+                  .pipe(Effect.mapError(classifyPromptFailure)),
               ),
             resume: (sessionID) => Effect.runPromise(context.session.resume({ sessionID: Session.ID.make(sessionID) })),
             cancelInbox: (input) =>

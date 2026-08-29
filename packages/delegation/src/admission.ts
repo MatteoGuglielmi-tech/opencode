@@ -170,11 +170,8 @@ export function execute<Result>(
 
 function resolveRetry(parsed: Parsed, invocation: Invocation, admitted: AdmissionIdentity) {
   const selector = parsed.agent ?? "general"
-  const agent = selector === "parent" ? invocation.parentAgent : selector
-  const selected =
-    parsed.model === undefined
-      ? { providerID: admitted.model.providerID, id: admitted.model.modelID, variant: admitted.model.variant }
-      : modelRef(parsed.model, invocation)
+  const agent = selector === "parent" ? admitted.agent : selector
+  const selected = retryModel(parsed.model, invocation, admitted)
   const sameModel = admitted.model.providerID === selected.providerID && admitted.model.modelID === selected.id
   const variant = parsed.effort ?? (sameModel ? admitted.model.variant : selected.variant)
   const context = parsed.context?.trim()
@@ -191,6 +188,18 @@ function resolveRetry(parsed: Parsed, invocation: Invocation, admitted: Admissio
     skills: invocation.skills,
     operations: parsed.operations,
   }
+}
+
+function retryModel(value: string | undefined, invocation: Invocation, admitted: AdmissionIdentity): ModelRef {
+  const stored = { providerID: admitted.model.providerID, id: admitted.model.modelID, variant: admitted.model.variant }
+  if (value === undefined) return stored
+  if (!value.includes("/")) {
+    if (value === stored.id) return stored
+    return { providerID: stored.providerID, id: value }
+  }
+  const selected = modelRef(value, invocation)
+  if (selected.providerID === stored.providerID && selected.id === stored.id) return stored
+  return selected
 }
 
 export function resolve(parsed: Parsed, invocation: Invocation, inventory: Inventory) {
