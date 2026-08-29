@@ -81,6 +81,31 @@ describe("delegation admission", () => {
     })
   })
 
+  test("keeps slash-attached skills distinct from backticked operation text", () => {
+    const inventory = {
+      agents: [{ id: "general", name: "General", mode: "subagent" as const }],
+      models: [{ providerID: "openai", id: "gpt-5", variants: [] }],
+      skills: ["bugfix-session"],
+    }
+    const parent = {
+      parentAgent: "general",
+      parentModel: { providerID: "openai", id: "gpt-5" },
+      files: [],
+      agents: [],
+    }
+
+    expect(
+      resolve(
+        parse('task="/bugfix-session inspect the failure"'),
+        { ...parent, skills: [{ id: "bugfix-session" }] },
+        inventory,
+      ).skills,
+    ).toEqual([{ id: "bugfix-session" }])
+    expect(resolve(parse('task="`bugfix-session` inspect the failure"'), { ...parent, skills: [] }, inventory).skills).toEqual(
+      [],
+    )
+  })
+
   test("resolves short models in the parent provider and rejects invalid references", () => {
     const inventory = {
       agents: [

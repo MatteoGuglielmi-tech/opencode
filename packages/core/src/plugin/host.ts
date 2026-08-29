@@ -308,7 +308,11 @@ export const make = Effect.fn("PluginHost.make")(function* (
         }),
     },
     skill: {
-      list: () => response(skill.list()),
+      list: (input) => {
+        const ref = locationRef(input)
+        if (ref && !isCurrentLocation(ref)) return runtime.location.skill.list(ref)
+        return response(skill.list())
+      },
       reload: skill.reload,
       transform: (callback) =>
         skill.transform((draft) => {

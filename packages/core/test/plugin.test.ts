@@ -19,6 +19,7 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionInbox } from "@opencode-ai/core/session/inbox"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { AbsolutePath } from "@opencode-ai/core/schema"
+import { Skill } from "@opencode-ai/core/skill"
 import { Tool } from "@opencode-ai/core/tool"
 import { Workspace } from "@opencode-ai/core/workspace"
 import { testEffect } from "./lib/effect"
@@ -98,6 +99,48 @@ describe("Plugin", () => {
       expect(
         (yield* host.catalog.model.list({ location: { directory: ref.directory } })).data.map((item) => item.id),
       ).toEqual([model.id])
+    }),
+  )
+
+  it.effect("routes explicit skill reads to their Location", () =>
+    Effect.gen(function* () {
+      const plugins = yield* Plugin.Service
+      const runtime = yield* PluginRuntime.Service
+      const location = yield* Location.Service
+      const ref = Location.Ref.make({ directory: AbsolutePath.make("/other") })
+      const skill = Skill.Info.make({
+        id: Skill.ID.make("location-skill"),
+        name: Skill.Name.make("Location skill"),
+        description: "Visible only at the requested location",
+        location: AbsolutePath.make("/other/.opencode/skills/location-skill/SKILL.md"),
+        content: "# Location skill",
+      })
+      const host = yield* PluginHost.make(plugins).pipe(
+        Effect.provideService(
+          PluginRuntime.Service,
+          PluginRuntime.Service.of({
+            ...runtime,
+            location: {
+              ...runtime.location,
+              skill: {
+                list: () =>
+                  Effect.succeed({
+                    location: new Location.Info({
+                      directory: ref.directory,
+                      workspaceID: ref.workspaceID,
+                      project: location.project,
+                    }),
+                    data: [skill],
+                  }),
+              },
+            },
+          } as PluginRuntime.Interface),
+        ),
+      )
+
+      expect((yield* host.skill.list({ location: { directory: ref.directory } })).data.map((item) => item.id)).toEqual([
+        skill.id,
+      ])
     }),
   )
 

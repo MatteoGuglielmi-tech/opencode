@@ -9,6 +9,7 @@ import { Location } from "../location.js"
 import { LocationServiceMap } from "../location-service-map.js"
 import { Model } from "../model.js"
 import { Session } from "../session.js"
+import { Skill } from "../skill.js"
 
 export interface Interface {
   readonly session: Pick<
@@ -43,6 +44,11 @@ export interface Interface {
           ref: Location.Ref,
         ) => Effect.Effect<{ readonly location: Location.Info; readonly data: Model.Info | undefined }>
       }
+    }
+    readonly skill: {
+      readonly list: (
+        ref: Location.Ref,
+      ) => Effect.Effect<{ readonly location: Location.Info; readonly data: Skill.Info[] }>
     }
   }
 }
@@ -100,6 +106,9 @@ export const layerWithCell = (cell: Cell) =>
             list: (ref) => require(cell, (runtime) => runtime.location.catalog.model.list(ref)),
             default: (ref) => require(cell, (runtime) => runtime.location.catalog.model.default(ref)),
           },
+        },
+        skill: {
+          list: (ref) => require(cell, (runtime) => runtime.location.skill.list(ref)),
         },
       },
     }),
@@ -159,6 +168,21 @@ export const providerLayerWithCell = (cell: Cell) =>
                   }
                 }).pipe(Effect.provide(locations.get(ref)), Effect.orDie),
             },
+          },
+          skill: {
+            list: (ref) =>
+              Effect.gen(function* () {
+                const location = yield* Location.Service
+                const skill = yield* Skill.Service
+                return {
+                  location: new Location.Info({
+                    directory: location.directory,
+                    workspaceID: location.workspaceID,
+                    project: location.project,
+                  }),
+                  data: yield* skill.list(),
+                }
+              }).pipe(Effect.provide(locations.get(ref)), Effect.orDie),
           },
         },
       }

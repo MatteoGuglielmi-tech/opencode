@@ -194,6 +194,85 @@ describe("delegation supervision", () => {
     await store.close()
   })
 
+  test("starts a child for an attached slash skill that remains visible at execution", async () => {
+    await using tmp = await tempDirectory()
+    const options = decode({ profile: tmp.path, store: path.join(tmp.path, "coordinator.sqlite"), concurrency: 1 })
+    await initialize(options)
+    const store = await open(options)
+    const batch = await store.admit({
+      ...request("parent-a", ["/bugfix-session inspect the failure"], 1),
+      skills: [{ id: "bugfix-session" }],
+    })
+    await store.acknowledgeReceipt(batch.batch.id)
+    const calls: string[] = []
+    const supervisor = new Supervisor(store, 1, {
+      parentExists: async () => true,
+      validate: async (operation) => {
+        if (!operation.skills.some((skill) => skill.id === "bugfix-session"))
+          throw new Error("attached skill was not admitted")
+      },
+      createChild: async () => {
+        calls.push("create")
+        return "child-1"
+      },
+      prompt: async () => calls.push("prompt"),
+      resume: async () => calls.push("resume"),
+      cancelInbox: async () => {},
+      interrupt: async () => {},
+      steer: async () => {},
+      messages: async () => [],
+      synthetic: async () => {},
+    })
+
+    await supervisor.drain()
+
+    expect(calls).toEqual(["create", "prompt", "resume"])
+    expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({ state: "starting", childID: "child-1" })
+    await supervisor.close()
+    await store.close()
+  })
+
+  test("rejects an attached skill that disappears before child creation", async () => {
+    await using tmp = await tempDirectory()
+    const options = decode({ profile: tmp.path, store: path.join(tmp.path, "coordinator.sqlite"), concurrency: 1 })
+    await initialize(options)
+    const store = await open(options)
+    const batch = await store.admit({
+      ...request("parent-a", ["/missing inspect the failure"], 1),
+      skills: [{ id: "missing" }],
+    })
+    await store.acknowledgeReceipt(batch.batch.id)
+    let created = false
+    const supervisor = new Supervisor(store, 1, {
+      parentExists: async () => true,
+      validate: async (operation) => {
+        if (operation.skills.some((skill) => skill.id === "missing"))
+          throw new Error("Admitted skill disappeared: missing")
+      },
+      createChild: async () => {
+        created = true
+        return "child-1"
+      },
+      prompt: async () => {},
+      resume: async () => {},
+      cancelInbox: async () => {},
+      interrupt: async () => {},
+      steer: async () => {},
+      messages: async () => [],
+      synthetic: async () => {},
+    })
+
+    await supervisor.drain()
+
+    expect(created).toBe(false)
+    expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({
+      state: "failed",
+      reason: "Admitted skill disappeared: missing",
+    })
+    await supervisor.close()
+    await store.close()
+  })
+
   test("serializes concurrent lifecycle events for one operation", async () => {
     await using tmp = await tempDirectory()
     const options = decode({ profile: tmp.path, store: path.join(tmp.path, "coordinator.sqlite"), concurrency: 1 })
