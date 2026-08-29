@@ -242,7 +242,7 @@ describe("delegation supervision", () => {
       skills: [{ id: "missing" }],
     })
     await store.acknowledgeReceipt(batch.batch.id)
-    let created = false
+    const calls: string[] = []
     const supervisor = new Supervisor(store, 1, {
       parentExists: async () => true,
       validate: async (operation) => {
@@ -250,7 +250,7 @@ describe("delegation supervision", () => {
           throw new Error("Admitted skill disappeared: missing")
       },
       createChild: async () => {
-        created = true
+        calls.push("create")
         return "child-1"
       },
       prompt: async () => {},
@@ -264,7 +264,7 @@ describe("delegation supervision", () => {
 
     await supervisor.drain()
 
-    expect(created).toBe(false)
+    expect(calls).toEqual([])
     expect(await store.operation(batch.batch.operations[0].id)).toMatchObject({
       state: "failed",
       reason: "Admitted skill disappeared: missing",
