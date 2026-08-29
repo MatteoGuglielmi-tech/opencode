@@ -272,3 +272,35 @@ test("reactive TUI ownership releases once on Solid disposal before lifecycle cl
   expect(commands.at(-1)?.slice(1, 4)).toEqual(["pane", "release-agent", "w1:p2"])
   expect(commands.filter((command) => command[2] === "release-agent")).toHaveLength(1)
 })
+
+test("authoritative activity replaces a stale blocked projection immediately", async () => {
+  const commands: string[][] = []
+  const reporter = createHerdrReporter(env, {
+    run: async (command) => void commands.push(command),
+  })!
+  let activity = (_sessionID: string) => {}
+
+  const dispose = createRoot((dispose) => {
+    startHerdrReporting({
+      reporter,
+      projection: () => projection({ permissions: () => 1 }),
+      lifecycle: { add: () => () => {} },
+      activity: (handler) => {
+        activity = handler
+        return () => {}
+      },
+    })
+    return dispose
+  })
+
+  await Bun.sleep(0)
+  activity("ses_child")
+  await Bun.sleep(0)
+  dispose()
+
+  expect(
+    commands
+      .filter((command) => command[2] === "report-agent")
+      .map((command) => command[command.indexOf("--state") + 1]),
+  ).toEqual(["blocked", "working"])
+})

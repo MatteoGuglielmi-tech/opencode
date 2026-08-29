@@ -149,6 +149,7 @@ export function startHerdrReporting(input: {
   reporter: NonNullable<ReturnType<typeof createHerdrReporter>> | undefined
   projection: () => HerdrProjection
   lifecycle: { add(finalizer: () => Promise<void>): () => void }
+  activity?: (handler: (sessionID: string) => void) => () => void
 }) {
   const reporter = input.reporter
   if (!reporter) return
@@ -157,6 +158,15 @@ export function startHerdrReporting(input: {
     snapshot = deriveHerdrSnapshot(input.projection())
     void reporter.update(snapshot)
   })
+  const stopActivity =
+    input.activity?.((sessionID) => {
+      const projection = input.projection()
+      if (!projection.selectedSessionID) return
+      const selected = projection.root(projection.selectedSessionID)
+      if (projection.root(sessionID) !== selected) return
+      snapshot = { state: "working", sessionID: selected }
+      void reporter.update(snapshot)
+    }) ?? (() => {})
   const retry = setTimeout(() => {
     if (snapshot) void reporter.refresh(snapshot)
   }, 1_000)
@@ -164,6 +174,7 @@ export function startHerdrReporting(input: {
   let cleaning: Promise<void> | undefined
   const cleanup = () => {
     clearTimeout(retry)
+    stopActivity()
     remove()
     cleaning ??= reporter.release()
     return cleaning

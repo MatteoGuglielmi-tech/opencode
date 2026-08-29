@@ -484,6 +484,9 @@ function App(props: { pair?: DialogPairCredentials }) {
   startHerdrReporting({
     reporter: createHerdrReporter(),
     lifecycle,
+    activity: (handler) => {
+      return event.on("session.execution.started", (event) => handler(event.data.sessionID))
+    },
     projection: () => ({
       selectedSessionID: route.data.type === "session" ? route.data.sessionID : undefined,
       root: data.session.root,
