@@ -23,7 +23,6 @@
     "typecheck:profile:packages": "bun script/profile-typecheck-packages.ts",
     "upgrade-opentui": "bun run script/upgrade-opentui.ts",
     "postinstall": "bun run --cwd packages/core fix-node-pty",
-    "prepare": "husky",
     "random": "echo 'Random script'",
     "sso": "aws sso login --sso-session=opencode --no-browser",
     "translate:app": "bun run script/translate-app.ts",
@@ -107,7 +106,6 @@
     }
   },
   "devDependencies": {
-    "@actions/artifact": "5.0.1",
     "@ast-grep/cli": "0.44.0",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
@@ -115,7 +113,6 @@
     "@types/mime-types": "3.0.1",
     "@typescript/native-preview": "catalog:",
     "glob": "13.0.5",
-    "husky": "9.1.7",
     "oxlint": "1.60.0",
     "oxlint-tsgolint": "0.21.0",
     "prettier": "3.6.2",

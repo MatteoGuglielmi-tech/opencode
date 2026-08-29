@@ -1,8 +1,10 @@
 # OpenCode V2 Delegation Fork
 
-This repository is an experimental fork of the [OpenCode V2 branch](https://github.com/anomalyco/opencode/tree/v2). The active fork branch is [`delegation-v2`](https://github.com/MatteoGuglielmi-tech/opencode/tree/delegation-v2).
+This repository is an experimental fork of the [OpenCode V2 branch](https://github.com/anomalyco/opencode/tree/v2). The fork's primary branch is [`v2`](https://github.com/MatteoGuglielmi-tech/opencode/tree/v2); [`delegation-v2`](https://github.com/MatteoGuglielmi-tech/opencode/tree/delegation-v2) remains its Delegation development branch.
 
 Use upstream OpenCode for the supported product. This fork exists to develop and validate durable delegated work and its supervision experience.
+
+The retained repository is intentionally kept clonable, installable, testable, and buildable. A fresh checkout supports the development and native CLI build commands documented below without relying on files removed from this personal fork.
 
 ## Added Features
 
