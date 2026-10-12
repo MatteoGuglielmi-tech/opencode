@@ -57,12 +57,12 @@ function registerHooks(ctx: Context, hooks: Hooks) {
         Effect.promise(async () => {
           const v1input = { tool: event.tool, sessionID: event.sessionID, callID: event.id, args: event.input }
           if (event.status === "error") {
-            await after(v1input, { output: event.error.message, metadata: event.error.metadata })
+            await after(v1input, { output: event.error.message, metadata: event.error.metadata, args: event.input })
             return
           }
           const original =
             typeof event.result.content === "string" ? event.result.content : unstringify(event.result.output)
-          const v1output: AnyRecord = { output: original, metadata: event.result.metadata }
+          const v1output: AnyRecord = { output: original, metadata: event.result.metadata, args: event.input }
           await after(v1input, v1output)
           if (v1output.output !== original) event.result.content = v1output.output
           if (v1output.metadata !== undefined) event.result.metadata = v1output.metadata

@@ -68,6 +68,38 @@ describe("PluginLegacy hook bridge", () => {
     }),
   )
 
+  it.effect("exposes tool args on the v1 output (cbm access pattern)", () =>
+    Effect.gen(function* () {
+      const plugins = yield* Plugin.Service
+      const hooks = yield* PluginHooks.Service
+      const mod = {
+        Cbm: async () => ({
+          "tool.execute.after": async (
+            _input: unknown,
+            output: { output: string; args?: { pattern?: string } },
+          ) => {
+            output.output += `\nPATTERN:${output.args?.pattern}`
+          },
+        }),
+      }
+      const legacy = PluginLegacy.fromModule(mod, { target: "/tmp/cbm-augment.ts" })!
+      yield* plugins.activate([{ ...legacy, revision: "1" }])
+
+      const event = {
+        tool: "grep",
+        sessionID: Session.ID.make("ses_legacy"),
+        agent: Agent.ID.make("build"),
+        messageID: SessionMessage.ID.make("msg_legacy"),
+        id: Tool.CallID.make("call_legacy"),
+        input: { pattern: "session" },
+        status: "completed" as const,
+        result: { content: "line", metadata: { matches: 1 } },
+      }
+      yield* hooks.trigger("tool", "execute.after", event)
+      expect(event.result.content).toContain("session")
+    }),
+  )
+
   it.effect("logs and skips unsupported hooks without throwing", () =>
     Effect.gen(function* () {
       const plugins = yield* Plugin.Service
