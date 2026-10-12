@@ -26,6 +26,7 @@ import { stringWidth } from "../../util/string-width"
 import { parseFileLineRange, stripFileLineRange } from "../../prompt/parse"
 import { moveSelection, reconcileSelectionWindow, revealSelectionOffset } from "../../ui/select-controller"
 import { directoryAutocomplete, slashArgumentAutocomplete } from "../../prompt/directory-completion"
+import { slashSkillOptions } from "../../prompt/slash-catalog"
 
 export type AutocompleteRef = {
   onInput: (value: string) => void
@@ -163,7 +164,7 @@ export function Autocomplete(props: {
 
     const charAfterCursor = displayCharAt(props.value, currentCursorOffset)
     const needsSpace = charAfterCursor !== " "
-    const prefix = "@"
+    const prefix = part.type === "skill" ? "/" : "@"
     const append = prefix + text + (needsSpace ? " " : "")
 
     input.cursorOffset = store.index
@@ -424,22 +425,6 @@ export function Autocomplete(props: {
       )
   })
 
-  const skillOptions = createMemo(() =>
-    (data.location.skill.list(location.current) ?? []).map(
-      (skill): AutocompleteOption => ({
-        display: "@" + skill.id,
-        description: skill.description,
-        kind: "skill",
-        onSelect: () => {
-          insertPart(skill.id, {
-            type: "skill",
-            value: { id: Skill.ID.make(skill.id), mention: { start: 0, end: 0, text: "" } },
-          })
-        },
-      }),
-    ),
-  )
-
   const referenceAliases = createMemo(() =>
     references()
       .filter((reference) => !reference.hidden)
@@ -472,16 +457,19 @@ export function Autocomplete(props: {
   }
 
   const commands = createMemo((): AutocompleteOption[] => {
+    const commandNames = new Set<string>()
     const results: AutocompleteOption[] = keymapCommands().flatMap((command) => {
       const slash = command.slash
       if (!slash) return []
-      return [slash.name, ...(slash.aliases ?? [])].map((name) => ({
-        display: `/${name}`,
-        description: command.description ?? command.title,
-        onSelect: slash.arguments ? () => insertSlash(name) : command.run,
-      }))
+      return [slash.name, ...(slash.aliases ?? [])].map((name) => {
+        commandNames.add(name)
+        return {
+          display: `/${name}`,
+          description: command.description ?? command.title,
+          onSelect: slash.arguments ? () => insertSlash(name) : command.run,
+        }
+      })
     })
-    const commandNames = new Set<string>()
 
     for (const serverCommand of data.location.command.list(location.current) ?? []) {
       commandNames.add(serverCommand.name)
@@ -490,6 +478,19 @@ export function Autocomplete(props: {
         description: serverCommand.description,
         queueable: true,
         onSelect: () => insertSlash(serverCommand.name),
+      })
+    }
+
+    for (const skill of slashSkillOptions(data.location.skill.list(location.current) ?? [], commandNames)) {
+      results.push({
+        display: skill.display,
+        description: skill.description,
+        kind: "skill",
+        onSelect: () =>
+          insertPart(skill.id, {
+            type: "skill",
+            value: { id: Skill.ID.make(skill.id), mention: { start: 0, end: 0, text: "" } },
+          }),
       })
     }
 
@@ -540,7 +541,7 @@ export function Autocomplete(props: {
     const fileOptions: AutocompleteOption[] = store.visible === "reference" ? fileSearch.options : []
     const nonFileOptions: AutocompleteOption[] =
       store.visible === "reference"
-        ? [...skillOptions(), ...referenceAliasesValue, ...agentsValue]
+        ? [...referenceAliasesValue, ...agentsValue]
         : store.index === 0
           ? [...commandsValue]
           : []
