@@ -1,6 +1,6 @@
 import { expect } from "bun:test"
 import path from "path"
-import { Clock, Deferred, Effect } from "effect"
+import { Clock, Deferred, Effect, Exit } from "effect"
 import { TestClock } from "effect/testing"
 import { Command } from "@opencode/core/command"
 import { Bus } from "@opencode/core/bus"
@@ -606,5 +606,32 @@ it.effect("refreshes expired OAuth credentials through the context during activa
       }),
     ).toEqual(refreshed)
     expect(refreshes).toEqual([expired])
+  }),
+)
+
+it.live("falls back to the v1 legacy loader when the v2 shape is absent", () =>
+  Effect.gen(function* () {
+    const modules = yield* PluginModule.make().pipe(Effect.provide(Watcher.testLayer))
+    const definition = yield* modules.load({
+      type: "add",
+      target: path.join(import.meta.dir, "plugin/fixtures/legacy-v1-plugin.ts"),
+      options: {},
+    })
+    if ("pending" in definition || "blocked" in definition) return yield* Effect.die("Legacy plugin was not loaded")
+    expect(definition.id.startsWith("legacy:legacy-v1-plugin-")).toBe(true)
+  }),
+)
+
+it.live("still fails for a module with neither a v2 nor a v1 shape", () =>
+  Effect.gen(function* () {
+    const modules = yield* PluginModule.make().pipe(Effect.provide(Watcher.testLayer))
+    const exit = yield* modules
+      .load({
+        type: "add",
+        target: path.join(import.meta.dir, "plugin/fixtures/junk-plugin.ts"),
+        options: {},
+      })
+      .pipe(Effect.exit)
+    expect(Exit.isFailure(exit)).toBe(true)
   }),
 )

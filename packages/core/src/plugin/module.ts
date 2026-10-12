@@ -4,12 +4,13 @@ import type { Plugin } from "@opencode/plugin/effect/plugin"
 import { Host } from "@opencode/plugin/host"
 import { createPluginSources } from "@opencode/plugin/source"
 import { Npm } from "@opencode/util/npm"
-import { Deferred, Effect, FiberSet, PubSub, Schema, Stream } from "effect"
+import { Deferred, Effect, FiberSet, PubSub, Result, Schema, Stream } from "effect"
 import path from "path"
 import { stat } from "node:fs/promises"
 import { fileURLToPath, pathToFileURL } from "url"
 import type { ConfigPluginSource } from "../config/plugin/source.js"
 import type { Generation } from "../plugin.js"
+import { PluginLegacy } from "./legacy.js"
 import { PluginPromise } from "./promise.js"
 import { Config } from "../config.js"
 import { ManagedPolicy } from "../managed-policy.js"
@@ -122,16 +123,17 @@ const load = Effect.fn("PluginModule.load")(function* (
       ? sources.read(entrypoint)
       : Host.load(entrypoint).then((module) => ({ module, version: installed?.revision })),
   )
-  const value = (yield* Schema.decodeUnknownEffect(Module)(loaded.module).pipe(
-    Effect.mapError(
-      (cause) =>
-        new LoadError({
-          message: "Plugin must export a default definition with an id and an effect or setup function.",
-          cause,
-        }),
-    ),
-  )).default
-  const plugin = "effect" in value ? value : PluginPromise.fromPromise(value)
+  const decoded = yield* Schema.decodeUnknownEffect(Module)(loaded.module).pipe(Effect.result)
+  const plugin = Result.isSuccess(decoded)
+    ? "effect" in decoded.success.default
+      ? decoded.success.default
+      : PluginPromise.fromPromise(decoded.success.default)
+    : PluginLegacy.fromModule(loaded.module as Record<string, unknown>, operation)
+  if (!plugin)
+    return yield* new LoadError({
+      message: "Plugin must export a default definition with an id and an effect or setup function.",
+      cause: Result.isFailure(decoded) ? decoded.failure : undefined,
+    })
   return {
     id: plugin.id,
     features: {
